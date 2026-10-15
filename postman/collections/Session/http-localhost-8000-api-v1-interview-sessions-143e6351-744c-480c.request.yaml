@@ -1,0 +1,8 @@
+$kind: http-request
+name: http://localhost:8000/api/v1/interview/sessions/143e6351-744c-480c-aa6a-e3e366bc247b
+description: ""
+url: http://localhost:8000/api/v1/interview/sessions/143e6351-744c-480c-aa6a-e3e366bc247b
+method: GET
+headers:
+  Accept: application/json
+order: 1000
