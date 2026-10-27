@@ -1,0 +1,13 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/next-question"
+  method: POST
+  pathVariables:
+    session_id: string
+response:
+  statusCode: 502
+  statusText: Bad Gateway
+  body:
+    type: text
+    content: ""
+order: 5000

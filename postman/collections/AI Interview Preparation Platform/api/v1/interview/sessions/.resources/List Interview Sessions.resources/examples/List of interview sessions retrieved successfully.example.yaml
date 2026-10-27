@@ -1,0 +1,180 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions?limit=50&skip=0"
+  method: GET
+  headers:
+    Accept: application/json
+  queryParams:
+    limit: "50"
+    skip: "0"
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      [
+        {
+          "session_id": "string",
+          "role": "string",
+          "experience_level": "Fresher",
+          "difficulty": "Easy",
+          "topic": "string",
+          "question_type": "Scenario-Based",
+          "total_questions": 7,
+          "completed_questions": 7705,
+          "current_question_number": 3882,
+          "status": "in_progress",
+          "created_at": "string",
+          "updated_at": "string",
+          "questions": [
+            {
+              "question_number": 15,
+              "question": "string",
+              "expected_answer_points": [
+                "string"
+              ],
+              "difficulty": "Easy",
+              "topic": "string",
+              "follow_up_question": "string",
+              "candidate_answer": "string",
+              "evaluation": {
+                "overall_score": 20,
+                "rating": "Needs Improvement",
+                "sample_answer": "string",
+                "correct_points": [
+                  "string",
+                  "string"
+                ],
+                "missing_points": [
+                  "string",
+                  "string"
+                ],
+                "strengths": [
+                  "string",
+                  "string"
+                ],
+                "improvements": [
+                  "string",
+                  "string"
+                ]
+              }
+            },
+            {
+              "question_number": 13,
+              "question": "string",
+              "expected_answer_points": [
+                "string"
+              ],
+              "difficulty": "Medium",
+              "topic": "string",
+              "follow_up_question": "string",
+              "candidate_answer": "string",
+              "evaluation": {
+                "overall_score": 90,
+                "rating": "Needs Improvement",
+                "sample_answer": "string",
+                "correct_points": [
+                  "string",
+                  "string"
+                ],
+                "missing_points": [
+                  "string",
+                  "string"
+                ],
+                "strengths": [
+                  "string",
+                  "string"
+                ],
+                "improvements": [
+                  "string",
+                  "string"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "session_id": "string",
+          "role": "string",
+          "experience_level": "Fresher",
+          "difficulty": "Easy",
+          "topic": "string",
+          "question_type": "Scenario-Based",
+          "total_questions": 2,
+          "completed_questions": 3986,
+          "current_question_number": 133,
+          "status": "in_progress",
+          "created_at": "string",
+          "updated_at": "string",
+          "questions": [
+            {
+              "question_number": 12,
+              "question": "string",
+              "expected_answer_points": [
+                "string"
+              ],
+              "difficulty": "Medium",
+              "topic": "string",
+              "follow_up_question": "string",
+              "candidate_answer": "string",
+              "evaluation": {
+                "overall_score": 79,
+                "rating": "Good",
+                "sample_answer": "string",
+                "correct_points": [
+                  "string",
+                  "string"
+                ],
+                "missing_points": [
+                  "string",
+                  "string"
+                ],
+                "strengths": [
+                  "string",
+                  "string"
+                ],
+                "improvements": [
+                  "string",
+                  "string"
+                ]
+              }
+            },
+            {
+              "question_number": 8,
+              "question": "string",
+              "expected_answer_points": [
+                "string"
+              ],
+              "difficulty": "Easy",
+              "topic": "string",
+              "follow_up_question": "string",
+              "candidate_answer": "string",
+              "evaluation": {
+                "overall_score": 80,
+                "rating": "Fair",
+                "sample_answer": "string",
+                "correct_points": [
+                  "string",
+                  "string"
+                ],
+                "missing_points": [
+                  "string",
+                  "string"
+                ],
+                "strengths": [
+                  "string",
+                  "string"
+                ],
+                "improvements": [
+                  "string",
+                  "string"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+order: 1000

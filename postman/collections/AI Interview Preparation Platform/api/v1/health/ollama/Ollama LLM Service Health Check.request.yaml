@@ -1,0 +1,9 @@
+$kind: http-request
+description: Checks whether the Ollama server is reachable and whether the configured model is installed.
+url: "{{baseUrl}}/api/v1/health/ollama"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/Ollama LLM Service Health Check.resources/examples
+order: 1000

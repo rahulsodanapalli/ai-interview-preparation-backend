@@ -1,0 +1,97 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id"
+  method: GET
+  headers:
+    Accept: application/json
+  pathVariables:
+    session_id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "session_id": "string",
+        "role": "string",
+        "experience_level": "Mid-Level",
+        "difficulty": "Hard",
+        "topic": "string",
+        "question_type": "Behavioral",
+        "total_questions": 15,
+        "completed_questions": 2452,
+        "current_question_number": 8285,
+        "status": "in_progress",
+        "created_at": "string",
+        "updated_at": "string",
+        "questions": [
+          {
+            "question_number": 4,
+            "question": "string",
+            "expected_answer_points": [
+              "string"
+            ],
+            "difficulty": "Hard",
+            "topic": "string",
+            "follow_up_question": "string",
+            "candidate_answer": "string",
+            "evaluation": {
+              "overall_score": 21,
+              "rating": "Fair",
+              "sample_answer": "string",
+              "correct_points": [
+                "string",
+                "string"
+              ],
+              "missing_points": [
+                "string",
+                "string"
+              ],
+              "strengths": [
+                "string",
+                "string"
+              ],
+              "improvements": [
+                "string",
+                "string"
+              ]
+            }
+          },
+          {
+            "question_number": 12,
+            "question": "string",
+            "expected_answer_points": [
+              "string"
+            ],
+            "difficulty": "Easy",
+            "topic": "string",
+            "follow_up_question": "string",
+            "candidate_answer": "string",
+            "evaluation": {
+              "overall_score": 52,
+              "rating": "Needs Improvement",
+              "sample_answer": "string",
+              "correct_points": [
+                "string",
+                "string"
+              ],
+              "missing_points": [
+                "string",
+                "string"
+              ],
+              "strengths": [
+                "string",
+                "string"
+              ],
+              "improvements": [
+                "string",
+                "string"
+              ]
+            }
+          }
+        ]
+      }
+order: 1000

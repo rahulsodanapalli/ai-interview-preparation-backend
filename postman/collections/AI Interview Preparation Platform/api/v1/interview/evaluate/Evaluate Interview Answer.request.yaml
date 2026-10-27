@@ -1,0 +1,20 @@
+$kind: http-request
+description: Evaluates a candidate's answer against expected criteria using local Qwen 2.5 and returns structured feedback, strengths, improvements, and a rubric-aligned score.
+url: "{{baseUrl}}/api/v1/interview/evaluate"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "question": "string",
+      "expected_answer_points": [
+        "string"
+      ],
+      "candidate_answer": "string"
+    }
+settings: {}
+examples: ./.resources/Evaluate Interview Answer.resources/examples
+order: 1000

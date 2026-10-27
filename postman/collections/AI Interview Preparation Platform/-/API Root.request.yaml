@@ -1,0 +1,9 @@
+$kind: http-request
+description: Returns a welcome message and links to API documentation.
+url: "{{baseUrl}}/"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/API Root.resources/examples
+order: 1000

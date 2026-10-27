@@ -1,0 +1,35 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/complete"
+  method: POST
+  headers:
+    Accept: application/json
+  pathVariables:
+    session_id: string
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "session_id": "string",
+        "role": "string",
+        "topic": "string",
+        "total_questions": 6,
+        "questions_answered": 7577,
+        "average_score": 77.70236094100392,
+        "overall_rating": "Good",
+        "session_status": "in_progress",
+        "aggregated_strengths": [
+          "string",
+          "string"
+        ],
+        "aggregated_improvement_areas": [
+          "string",
+          "string"
+        ]
+      }
+order: 1000

@@ -1,0 +1,4 @@
+$kind: collection
+description: Backend API for the AI Interview Preparation Platform powered by FastAPI and local Qwen 2.5 on Ollama.
+variables:
+  baseUrl: /

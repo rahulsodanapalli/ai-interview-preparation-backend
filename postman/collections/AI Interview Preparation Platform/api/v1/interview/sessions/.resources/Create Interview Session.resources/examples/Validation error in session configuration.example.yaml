@@ -1,0 +1,24 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions"
+  method: POST
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "role": "string",
+        "experience_level": "Junior",
+        "difficulty": "Easy",
+        "topic": "string",
+        "question_type": "Technical",
+        "total_questions": 5
+      }
+response:
+  statusCode: 422
+  statusText: Unprocessable Entity (WebDAV) (RFC 4918)
+  body:
+    type: text
+    content: ""
+order: 2000

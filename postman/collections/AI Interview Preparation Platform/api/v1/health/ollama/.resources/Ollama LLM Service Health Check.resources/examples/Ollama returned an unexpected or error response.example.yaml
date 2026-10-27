@@ -1,0 +1,11 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/health/ollama"
+  method: GET
+response:
+  statusCode: 502
+  statusText: Bad Gateway
+  body:
+    type: text
+    content: ""
+order: 2000

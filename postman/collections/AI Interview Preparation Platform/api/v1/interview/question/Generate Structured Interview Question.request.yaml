@@ -1,0 +1,20 @@
+$kind: http-request
+description: Generates a tailored interview question with evaluation points and a follow-up question using the local Qwen 2.5 model via Ollama with guaranteed JSON structure.
+url: "{{baseUrl}}/api/v1/interview/question"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "role": "string",
+      "experience_level": "Senior",
+      "difficulty": "Hard",
+      "topic": "string",
+      "question_type": "Behavioral"
+    }
+settings: {}
+examples: ./.resources/Generate Structured Interview Question.resources/examples
+order: 1000

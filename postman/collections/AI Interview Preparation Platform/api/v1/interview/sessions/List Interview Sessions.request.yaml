@@ -1,0 +1,12 @@
+$kind: http-request
+description: Retrieve a paginated list of interview sessions ordered by most recent.
+url: "{{baseUrl}}/api/v1/interview/sessions?limit=50&skip=0"
+method: GET
+headers:
+  Accept: application/json
+queryParams:
+  limit: "50"
+  skip: "0"
+settings: {}
+examples: ./.resources/List Interview Sessions.resources/examples
+order: 3000

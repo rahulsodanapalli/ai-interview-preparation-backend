@@ -1,5 +1,18 @@
-"""Services module for external integrations and business logic."""
-
+from app.services.chunking_service import (
+    TextChunk,
+    TextChunkingService,
+    get_chunking_service,
+)
+from app.services.embedding_service import (
+    EmbeddingConnectionError,
+    EmbeddingDimensionMismatchError,
+    EmbeddingModelNotFoundError,
+    EmbeddingResponseError,
+    EmbeddingService,
+    EmbeddingServiceError,
+    EmbeddingTimeoutError,
+    get_embedding_service,
+)
 from app.services.ollama_service import (
     OllamaConnectionError,
     OllamaResponseError,
@@ -7,6 +20,40 @@ from app.services.ollama_service import (
     OllamaServiceError,
     OllamaTimeoutError,
     get_ollama_service,
+)
+from app.services.pdf_service import (
+    PDFEmptyFileError,
+    PDFEncryptedError,
+    PDFInvalidError,
+    PDFNoTextError,
+    PDFPageLimitError,
+    PDFProcessingError,
+    PDFService,
+    PDFSizeLimitError,
+    get_pdf_service,
+)
+from app.services.pinecone_service import (
+    PineconeConfigurationError,
+    PineconeConnectionError,
+    PineconeDimensionMismatchError,
+    PineconeIndexNotFoundError,
+    PineconeResponseError,
+    PineconeService,
+    PineconeServiceError,
+    PineconeTimeoutError,
+    get_pinecone_service,
+)
+from app.services.rag_question_service import (
+    RAGQuestionService,
+    get_rag_question_service,
+)
+from app.services.retrieval_service import (
+    EmptyQueryError,
+    InvalidDocumentIdError,
+    RetrievedChunk,
+    RetrievalService,
+    RetrievalServiceError,
+    get_retrieval_service,
 )
 from app.services.session_service import (
     SessionNotFoundError,
@@ -26,4 +73,41 @@ __all__ = [
     "SessionNotFoundError",
     "SessionStateError",
     "get_session_service",
+    "PDFService",
+    "PDFProcessingError",
+    "PDFSizeLimitError",
+    "PDFEmptyFileError",
+    "PDFInvalidError",
+    "PDFEncryptedError",
+    "PDFPageLimitError",
+    "PDFNoTextError",
+    "get_pdf_service",
+    "TextChunk",
+    "TextChunkingService",
+    "get_chunking_service",
+    "EmbeddingService",
+    "EmbeddingServiceError",
+    "EmbeddingConnectionError",
+    "EmbeddingTimeoutError",
+    "EmbeddingModelNotFoundError",
+    "EmbeddingResponseError",
+    "EmbeddingDimensionMismatchError",
+    "get_embedding_service",
+    "PineconeService",
+    "PineconeServiceError",
+    "PineconeConfigurationError",
+    "PineconeConnectionError",
+    "PineconeTimeoutError",
+    "PineconeIndexNotFoundError",
+    "PineconeDimensionMismatchError",
+    "PineconeResponseError",
+    "get_pinecone_service",
+    "RetrievalService",
+    "RetrievedChunk",
+    "RetrievalServiceError",
+    "InvalidDocumentIdError",
+    "EmptyQueryError",
+    "get_retrieval_service",
+    "RAGQuestionService",
+    "get_rag_question_service",
 ]

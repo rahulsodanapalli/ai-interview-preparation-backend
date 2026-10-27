@@ -1,0 +1,11 @@
+$kind: http-request
+description: Generate and advance to the next interview question using Qwen 2.5 on Ollama.
+url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/next-question"
+method: POST
+headers:
+  Accept: application/json
+pathVariables:
+  session_id: string
+settings: {}
+examples: ./.resources/Generate Next Interview Question for Session.resources/examples
+order: 1000

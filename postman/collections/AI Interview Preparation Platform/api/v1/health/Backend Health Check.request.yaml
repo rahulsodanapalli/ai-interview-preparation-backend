@@ -1,0 +1,9 @@
+$kind: http-request
+description: Returns the operational status and environment of the FastAPI backend.
+url: "{{baseUrl}}/api/v1/health"
+method: GET
+headers:
+  Accept: application/json
+settings: {}
+examples: ./.resources/Backend Health Check.resources/examples
+order: 3000

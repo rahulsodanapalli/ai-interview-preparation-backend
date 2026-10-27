@@ -1,8 +1,15 @@
 """Pydantic schemas for request and response validation."""
 
-from app.schemas.health import HealthCheckResponse, OllamaHealthResponse
+from app.schemas.document import DocumentUploadResponse
+from app.schemas.health import (
+    DatabaseHealthResponse,
+    HealthCheckResponse,
+    OllamaHealthResponse,
+)
 from app.schemas.interview import (
     DifficultyLevel,
+    DocumentQuestionRequest,
+    DocumentQuestionResponse,
     EvaluationRating,
     ExperienceLevel,
     InterviewEvaluationRequest,
@@ -10,6 +17,7 @@ from app.schemas.interview import (
     InterviewQuestionRequest,
     InterviewQuestionResponse,
     QuestionType,
+    RetrievedChunkMetadata,
 )
 from app.schemas.session import (
     CreateSessionRequest,
@@ -23,8 +31,11 @@ from app.schemas.session import (
 )
 
 __all__ = [
+    "DocumentUploadResponse",
+    "DatabaseHealthResponse",
     "HealthCheckResponse",
     "OllamaHealthResponse",
+
     "DifficultyLevel",
     "EvaluationRating",
     "ExperienceLevel",
@@ -33,6 +44,9 @@ __all__ = [
     "InterviewQuestionRequest",
     "InterviewQuestionResponse",
     "QuestionType",
+    "RetrievedChunkMetadata",
+    "DocumentQuestionRequest",
+    "DocumentQuestionResponse",
     "CreateSessionRequest",
     "InterviewSessionSummaryResponse",
     "SessionDetailResponse",

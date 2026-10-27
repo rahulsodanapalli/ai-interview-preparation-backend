@@ -1,0 +1,23 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/evaluate"
+  method: POST
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "question": "string",
+        "expected_answer_points": [
+          "string"
+        ],
+        "candidate_answer": "string"
+      }
+response:
+  statusCode: 503
+  statusText: Service Unavailable
+  body:
+    type: text
+    content: ""
+order: 4000

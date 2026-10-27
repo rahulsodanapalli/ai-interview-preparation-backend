@@ -1,0 +1,107 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions"
+  method: POST
+  headers:
+    Content-Type: application/json
+    Accept: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "role": "string",
+        "experience_level": "Junior",
+        "difficulty": "Easy",
+        "topic": "string",
+        "question_type": "Technical",
+        "total_questions": 5
+      }
+response:
+  statusCode: 201
+  statusText: Created
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "session_id": "string",
+        "role": "string",
+        "experience_level": "Mid-Level",
+        "difficulty": "Medium",
+        "topic": "string",
+        "question_type": "Behavioral",
+        "total_questions": 18,
+        "completed_questions": 8396,
+        "current_question_number": 6417,
+        "status": "completed",
+        "created_at": "string",
+        "updated_at": "string",
+        "questions": [
+          {
+            "question_number": 8,
+            "question": "string",
+            "expected_answer_points": [
+              "string"
+            ],
+            "difficulty": "Easy",
+            "topic": "string",
+            "follow_up_question": "string",
+            "candidate_answer": "string",
+            "evaluation": {
+              "overall_score": 91,
+              "rating": "Good",
+              "sample_answer": "string",
+              "correct_points": [
+                "string",
+                "string"
+              ],
+              "missing_points": [
+                "string",
+                "string"
+              ],
+              "strengths": [
+                "string",
+                "string"
+              ],
+              "improvements": [
+                "string",
+                "string"
+              ]
+            }
+          },
+          {
+            "question_number": 19,
+            "question": "string",
+            "expected_answer_points": [
+              "string"
+            ],
+            "difficulty": "Hard",
+            "topic": "string",
+            "follow_up_question": "string",
+            "candidate_answer": "string",
+            "evaluation": {
+              "overall_score": 18,
+              "rating": "Needs Improvement",
+              "sample_answer": "string",
+              "correct_points": [
+                "string",
+                "string"
+              ],
+              "missing_points": [
+                "string",
+                "string"
+              ],
+              "strengths": [
+                "string",
+                "string"
+              ],
+              "improvements": [
+                "string",
+                "string"
+              ]
+            }
+          }
+        ]
+      }
+order: 1000

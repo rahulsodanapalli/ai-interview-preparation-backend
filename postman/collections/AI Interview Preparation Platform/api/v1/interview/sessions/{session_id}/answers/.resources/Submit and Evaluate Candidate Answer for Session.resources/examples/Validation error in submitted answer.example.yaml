@@ -1,0 +1,22 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/answers"
+  method: POST
+  headers:
+    Content-Type: application/json
+  pathVariables:
+    session_id: string
+  body:
+    type: json
+    content: |-
+      {
+        "candidate_answer": "string",
+        "question_number": 5
+      }
+response:
+  statusCode: 422
+  statusText: Unprocessable Entity (WebDAV) (RFC 4918)
+  body:
+    type: text
+    content: ""
+order: 4000

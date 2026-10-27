@@ -609,3 +609,42 @@ def test_session_submit_answer_ollama_timeout():
         assert "AI inference service is currently unavailable" in response.json()["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+def test_list_sessions_in_memory():
+    """Test listing interview sessions via GET /api/v1/interview/sessions in memory mode."""
+    from app.db.session import get_db_optional
+
+    app.dependency_overrides[get_db_optional] = lambda: None
+    try:
+        get_session_service().reset_store()
+        # Initially empty
+        resp = client.get("/api/v1/interview/sessions")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+        # Create two sessions
+        resp1 = client.post("/api/v1/interview/sessions", json=VALID_SESSION_PAYLOAD)
+        assert resp1.status_code == 201
+        resp2 = client.post(
+            "/api/v1/interview/sessions",
+            json={**VALID_SESSION_PAYLOAD, "topic": "Next.js SSR"},
+        )
+        assert resp2.status_code == 201
+
+        list_resp = client.get("/api/v1/interview/sessions")
+        assert list_resp.status_code == 200
+        sessions = list_resp.json()
+        assert len(sessions) == 2
+        session_ids = [s["session_id"] for s in sessions]
+        assert resp1.json()["session_id"] in session_ids
+        assert resp2.json()["session_id"] in session_ids
+
+        # Test pagination
+        paginated_resp = client.get("/api/v1/interview/sessions?limit=1&skip=0")
+        assert paginated_resp.status_code == 200
+        assert len(paginated_resp.json()) == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
