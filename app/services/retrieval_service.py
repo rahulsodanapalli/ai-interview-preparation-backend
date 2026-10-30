@@ -7,6 +7,7 @@ searches scoped to specific documents in Pinecone, and returns structured chunk 
 from dataclasses import dataclass, field
 import logging
 from typing import Any, Dict, List, Optional
+from fastapi import Depends
 
 from app.core.config import settings
 from app.services.embedding_service import (
@@ -221,6 +222,12 @@ class RetrievalService:
         return retrieved
 
 
-def get_retrieval_service() -> RetrievalService:
-    """FastAPI dependency provider for RetrievalService."""
-    return RetrievalService()
+def get_retrieval_service(
+    embedding_service: EmbeddingService = Depends(get_embedding_service),
+    pinecone_service: PineconeService = Depends(get_pinecone_service),
+) -> RetrievalService:
+    """FastAPI dependency provider for RetrievalService with injected dependencies."""
+    return RetrievalService(
+        embedding_service=embedding_service,
+        pinecone_service=pinecone_service,
+    )

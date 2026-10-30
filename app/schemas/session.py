@@ -28,6 +28,21 @@ class SessionStatus(str, Enum):
         return None
 
 
+class SessionQuestionInput(BaseModel):
+    """Pre-generated question to be included directly upon session creation."""
+
+    id: Optional[str] = Field(default=None, description="Optional question ID")
+    question: str = Field(..., min_length=5, description="The interview question text")
+    expected_answer_points: List[str] = Field(
+        ...,
+        min_length=1,
+        description="Key technical criteria or concepts a strong answer should address",
+    )
+    follow_up_question: Optional[str] = Field(default=None, description="Probing follow-up question")
+    difficulty: Optional[DifficultyLevel] = Field(default=DifficultyLevel.MEDIUM, description="Difficulty level")
+    topic: Optional[str] = Field(default="Technical", description="Technical domain or topic")
+
+
 class CreateSessionRequest(BaseModel):
     """Request payload to initialize a new structured interview session."""
 
@@ -66,6 +81,14 @@ class CreateSessionRequest(BaseModel):
         le=20,
         description="Total number of interview questions configured for this session (between 1 and 20)",
         examples=[5],
+    )
+    source_id: Optional[str] = Field(
+        default=None,
+        description="Optional unique source identifier (document or URL) to link to this interview session",
+    )
+    questions: Optional[List[SessionQuestionInput]] = Field(
+        default=None,
+        description="Optional list of pre-generated source-grounded questions to initialize the session with",
     )
 
     @field_validator("role", "topic", mode="before")
@@ -185,6 +208,11 @@ class SessionDetailResponse(BaseModel):
         ge=0,
         description="Current question number (0 if no question generated yet)",
         examples=[1],
+    )
+    source_id: Optional[str] = Field(
+        default=None,
+        description="Optional source ID linked to this session",
+        examples=["src_a1b2c3d4e5f6"],
     )
     status: SessionStatus = Field(..., description="Current session lifecycle status", examples=[SessionStatus.IN_PROGRESS])
     questions: List[SessionQuestionItem] = Field(

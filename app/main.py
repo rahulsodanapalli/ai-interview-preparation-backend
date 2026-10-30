@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import documents, health, interview
+from app.api.routes import documents, github, health, interview, sources
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,8 @@ api_v1_prefix = settings.API_V1_PREFIX
 app.include_router(health.router, prefix=api_v1_prefix)
 app.include_router(interview.router, prefix=api_v1_prefix)
 app.include_router(documents.router, prefix=api_v1_prefix)
+app.include_router(github.router, prefix=api_v1_prefix)
+app.include_router(sources.router, prefix=api_v1_prefix)
 
 
 @app.get(
@@ -72,5 +74,6 @@ async def root():
         "ollama_health": f"{api_v1_prefix}/health/ollama",
         "database_health": f"{api_v1_prefix}/health/db",
         "document_upload": f"{api_v1_prefix}/documents/upload",
+        "github_validate": f"{api_v1_prefix}/github/validate",
     }
 

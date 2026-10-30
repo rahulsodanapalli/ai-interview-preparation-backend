@@ -277,6 +277,7 @@ class PineconeService:
             record_id = f"{document_id}#chunk_{chunk.index}"
             meta = {
                 "document_id": document_id,
+                "source_id": document_id,
                 "chunk_index": chunk.index,
                 "filename": filename,
                 "text": chunk.text,

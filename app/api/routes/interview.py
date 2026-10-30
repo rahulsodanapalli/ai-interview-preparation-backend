@@ -7,6 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db_optional
 
+from app.schemas.document import (
+    SourceQuestionsRequest,
+    SourceQuestionsResponse,
+)
 from app.schemas.interview import (
     DocumentQuestionRequest,
     DocumentQuestionResponse,
@@ -45,7 +49,12 @@ from app.services.pinecone_service import (
 )
 from app.services.rag_question_service import (
     RAGQuestionService,
+    SourceInsufficientContentError,
     get_rag_question_service,
+)
+from app.services.source_service import (
+    SourceNotFoundError,
+    SourceNotReadyError,
 )
 from app.services.retrieval_service import (
     EmptyQueryError,
@@ -363,6 +372,54 @@ async def generate_document_interview_question(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected internal error occurred while generating the document question.",
+        ) from exc
+
+
+@router.post(
+    "/source-questions",
+    response_model=SourceQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate Multiple Source-Grounded Interview Questions",
+    description="Generates multiple structured interview questions grounded in chunks retrieved for a selected source ID.",
+    responses={
+        200: {"description": "Grounded interview questions generated successfully"},
+        400: {"description": "Source not ready or insufficient content"},
+        404: {"description": "Source not found"},
+        422: {"description": "Missing source_id in payload"},
+        502: {"description": "Bad gateway from AI model"},
+        503: {"description": "Ollama or Pinecone unavailable"},
+    },
+)
+async def generate_source_interview_questions(
+    payload: SourceQuestionsRequest,
+    rag_service: RAGQuestionService = Depends(get_rag_question_service),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> SourceQuestionsResponse:
+    """Generate structured interview questions grounded in source content."""
+    if not payload.source_id or not payload.source_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'source_id' is required in request payload.",
+        )
+    try:
+        return await rag_service.generate_source_questions(payload, db=db)
+    except SourceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (SourceNotReadyError, SourceInsufficientContentError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Embedding service unavailable: {exc}") from exc
+    except (PineconeConnectionError, PineconeTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Pinecone service unavailable: {exc}") from exc
+    except (OllamaConnectionError, OllamaTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"AI model service unavailable: {exc}") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Unexpected error generating source questions: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected internal error occurred while generating interview questions.",
         ) from exc
 
 

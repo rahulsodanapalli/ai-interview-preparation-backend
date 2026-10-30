@@ -88,6 +88,7 @@ def _db_model_to_session_detail(session_db: InterviewSession) -> SessionDetailRe
         total_questions=session_db.total_questions,
         completed_questions=session_db.completed_questions,
         current_question_number=session_db.current_question_number,
+        source_id=getattr(session_db, "source_id", None),
         status=SessionStatus(session_db.status),
         questions=questions_list,
         created_at=session_db.created_at.isoformat() if session_db.created_at else datetime.now(timezone.utc).isoformat(),
@@ -112,9 +113,54 @@ class SessionService:
         """
         Create and initialize a new interview session.
         Persists to database when db is provided; updates in-memory cache.
+        Supports linking to a source and initializing with pre-generated questions.
+        Prevents accidental duplicate session creation within a short time window.
         """
+        # Accidental duplicate session prevention for source-based sessions
+        if payload.source_id:
+            now_dt = datetime.now(timezone.utc)
+            for existing in self._sessions.values():
+                if (
+                    existing.source_id == payload.source_id
+                    and existing.role == payload.role
+                    and existing.topic == payload.topic
+                    and existing.status == SessionStatus.IN_PROGRESS
+                ):
+                    try:
+                        created_dt = datetime.fromisoformat(existing.created_at)
+                        if (now_dt - created_dt).total_seconds() < 10.0:
+                            logger.info(
+                                "Duplicate session creation detected for source '%s'; returning existing session '%s'.",
+                                payload.source_id,
+                                existing.session_id,
+                            )
+                            return existing
+                    except Exception:
+                        pass
+
         session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+
+        # Build pre-populated question items if provided in payload
+        questions_list: List[SessionQuestionItem] = []
+        if payload.questions:
+            for idx, q_input in enumerate(payload.questions, start=1):
+                q_diff = q_input.difficulty or payload.difficulty
+                questions_list.append(
+                    SessionQuestionItem(
+                        question_number=idx,
+                        question=q_input.question,
+                        expected_answer_points=q_input.expected_answer_points,
+                        follow_up_question=q_input.follow_up_question,
+                        difficulty=q_diff,
+                        topic=q_input.topic or payload.topic,
+                        candidate_answer=None,
+                        evaluation=None,
+                    )
+                )
+
+        total_questions = max(len(questions_list), payload.total_questions) if questions_list else payload.total_questions
+        current_question_number = 1 if questions_list else 0
 
         session = SessionDetailResponse(
             session_id=session_id,
@@ -123,11 +169,12 @@ class SessionService:
             difficulty=payload.difficulty,
             topic=payload.topic,
             question_type=payload.question_type,
-            total_questions=payload.total_questions,
+            total_questions=total_questions,
             completed_questions=0,
-            current_question_number=0,
+            current_question_number=current_question_number,
+            source_id=payload.source_id,
             status=SessionStatus.IN_PROGRESS,
-            questions=[],
+            questions=questions_list,
             created_at=now,
             updated_at=now,
         )
@@ -154,16 +201,48 @@ class SessionService:
                     if hasattr(payload.question_type, "value")
                     else str(payload.question_type)
                 ),
-                total_questions=payload.total_questions,
+                total_questions=total_questions,
                 completed_questions=0,
-                current_question_number=0,
+                current_question_number=current_question_number,
+                source_id=payload.source_id,
                 status=SessionStatus.IN_PROGRESS.value,
             )
             db.add(session_db)
             db.flush()
-            logger.info("Persisted session %s to database.", session_id)
 
-        logger.info("Created interview session %s for role '%s' on topic '%s'.", session_id, payload.role, payload.topic)
+            # Persist pre-generated questions to the database
+            for q_item in questions_list:
+                q_db = InterviewQuestion(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    order=q_item.question_number,
+                    question=q_item.question,
+                    topic=q_item.topic,
+                    difficulty=(
+                        q_item.difficulty.value
+                        if hasattr(q_item.difficulty, "value")
+                        else str(q_item.difficulty)
+                    ),
+                    question_type=(
+                        payload.question_type.value
+                        if hasattr(payload.question_type, "value")
+                        else str(payload.question_type)
+                    ),
+                    expected_answer_points=q_item.expected_answer_points,
+                    follow_up_question=q_item.follow_up_question,
+                    candidate_answer=None,
+                )
+                db.add(q_db)
+            db.flush()
+            logger.info("Persisted session %s (with %d questions) to database.", session_id, len(questions_list))
+
+        logger.info(
+            "Created interview session %s for role '%s' on topic '%s' (source_id=%s).",
+            session_id,
+            payload.role,
+            payload.topic,
+            payload.source_id,
+        )
         return session
 
     def get_session(

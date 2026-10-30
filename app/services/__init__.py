@@ -13,6 +13,19 @@ from app.services.embedding_service import (
     EmbeddingTimeoutError,
     get_embedding_service,
 )
+from app.services.github_mcp_service import (
+    GitHubConnectionError,
+    GitHubFileNotFoundError,
+    GitHubFileTooLargeError,
+    GitHubMCPService,
+    GitHubPermissionError,
+    GitHubRateLimitError,
+    GitHubRepoNotFoundError,
+    GitHubServiceError,
+    GitHubTimeoutError,
+    GitHubValidationError,
+    get_github_service,
+)
 from app.services.ollama_service import (
     OllamaConnectionError,
     OllamaResponseError,
@@ -46,6 +59,10 @@ from app.services.pinecone_service import (
 from app.services.rag_question_service import (
     RAGQuestionService,
     get_rag_question_service,
+)
+from app.services.repo_question_service import (
+    RepoQuestionService,
+    get_repo_question_service,
 )
 from app.services.retrieval_service import (
     EmptyQueryError,
@@ -110,4 +127,18 @@ __all__ = [
     "get_retrieval_service",
     "RAGQuestionService",
     "get_rag_question_service",
+    # GitHub MCP Services
+    "GitHubMCPService",
+    "GitHubServiceError",
+    "GitHubValidationError",
+    "GitHubRepoNotFoundError",
+    "GitHubFileNotFoundError",
+    "GitHubPermissionError",
+    "GitHubRateLimitError",
+    "GitHubTimeoutError",
+    "GitHubConnectionError",
+    "GitHubFileTooLargeError",
+    "get_github_service",
+    "RepoQuestionService",
+    "get_repo_question_service",
 ]

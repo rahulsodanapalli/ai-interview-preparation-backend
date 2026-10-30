@@ -74,6 +74,12 @@ class InterviewSession(Base):
         index=True,
         comment="Session lifecycle status ('in_progress', 'completed')",
     )
+    source_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="Source identifier (document_id or url) linked to this interview session",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -292,3 +298,86 @@ class AnswerEvaluation(Base):
 
     def __repr__(self) -> str:
         return f"<AnswerEvaluation(id={self.id}, question_id={self.question_id}, score={self.score}, rating='{self.rating}')>"
+
+
+class DocumentSource(Base):
+    """
+    SQLAlchemy model representing an ingested document or URL source.
+    Persists metadata, source type, and indexing status.
+    """
+
+    __tablename__ = "document_sources"
+
+    id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        index=True,
+        comment="Unique source identifier (e.g. doc_... or src_...)",
+    )
+    source_type: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="document",
+        comment="Source type: 'document', 'url', or 'github'",
+    )
+    title: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="Title or filename of the source",
+    )
+    url: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Canonical URL if source is a webpage or repository",
+    )
+    filename: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Filename if source is an uploaded document",
+    )
+    status: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+        default="completed",
+        index=True,
+        comment="Processing status: 'processing', 'completed', 'failed'",
+    )
+    character_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Total characters extracted from source",
+    )
+    chunk_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Total chunks indexed into Pinecone",
+    )
+    vector_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Total vectors upserted to Pinecone",
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Error message if processing failed",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        comment="Timestamp when source was registered",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+        comment="Timestamp of last update",
+    )
+
+    def __repr__(self) -> str:
+        return f"<DocumentSource(id='{self.id}', type='{self.source_type}', title='{self.title}', status='{self.status}')>"

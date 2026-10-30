@@ -50,6 +50,18 @@ class Settings(BaseSettings):
     # Excerpts scoring below this threshold are filtered out as irrelevant/noise.
     RAG_MIN_RELEVANCE_SCORE: float = 0.55
 
+    # GitHub MCP Integration Settings (Day 6)
+    # Optional personal access token for read-only repository inspection.
+    # If not provided, public repositories will still be accessible within standard GitHub rate limits.
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_PERSONAL_ACCESS_TOKEN: Optional[str] = None
+    GITHUB_API_BASE_URL: str = "https://api.github.com"
+    GITHUB_REQUEST_TIMEOUT_SECONDS: float = 15.0
+    GITHUB_MCP_TIMEOUT_SECONDS: float = 30.0
+    GITHUB_MCP_SERVER_COMMAND: Optional[str] = None
+    GITHUB_MAX_FILE_SIZE_BYTES: int = 500 * 1024  # 500 KB limit for reading code files
+
+
     @field_validator("CORS_ORIGINS")
     @classmethod
     def assemble_cors_origins(cls, v: Any) -> List[str]:

@@ -7,12 +7,37 @@ so the entire test suite runs offline, deterministically, and without network de
 from typing import List, Optional
 import pytest
 
+from app.db.base import Base
+from app.db.session import get_db
 from app.main import app
 from app.services.chunking_service import TextChunk
 from app.services.embedding_service import EmbeddingService, get_embedding_service
 from app.services.pinecone_service import PineconeService, get_pinecone_service
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 MOCK_EMBEDDING_DIM = 768
+
+_test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+Base.metadata.create_all(bind=_test_engine)
+_TestSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_test_engine)
+
+
+def _get_test_db():
+    db = _TestSessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 class DefaultMockEmbeddingService(EmbeddingService):
@@ -59,6 +84,7 @@ class DefaultMockPineconeService(PineconeService):
             self.upserted_records.append({
                 "id": f"{document_id}#chunk_{chunk.index}",
                 "document_id": document_id,
+                "source_id": document_id,
                 "chunk_index": chunk.index,
                 "filename": filename,
                 "text": chunk.text,
@@ -85,7 +111,7 @@ class DefaultMockPineconeService(PineconeService):
         namespace: Optional[str] = None,
         filter_dict: Optional[dict] = None,
     ) -> List[dict]:
-        records = [r for r in self.upserted_records if not document_id or r.get("document_id") == document_id]
+        records = [r for r in self.upserted_records if not document_id or r.get("document_id") == document_id or r.get("source_id") == document_id]
         if not records and document_id:
             return [
                 {
@@ -127,6 +153,8 @@ def setup_default_service_mocks():
         app.dependency_overrides[get_embedding_service] = lambda: DefaultMockEmbeddingService()
     if get_pinecone_service not in app.dependency_overrides:
         app.dependency_overrides[get_pinecone_service] = lambda: DefaultMockPineconeService()
+    if get_db not in app.dependency_overrides:
+        app.dependency_overrides[get_db] = _get_test_db
 
     yield
 

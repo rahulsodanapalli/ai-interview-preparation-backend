@@ -30,6 +30,20 @@ from app.schemas.session import (
     SubmitAnswerRequest,
 )
 
+from app.schemas.github import (
+    RepoEvidence,
+    RepoFileContentResponse,
+    RepoFileItem,
+    RepoFileRequest,
+    RepoFilesListResponse,
+    RepoIdentifierRequest,
+    RepoMetadataResponse,
+    RepoQuestionRequest,
+    RepoQuestionResponse,
+    RepoReadmeResponse,
+    parse_repo_identifier,
+)
+
 __all__ = [
     "DocumentUploadResponse",
     "DatabaseHealthResponse",
@@ -55,4 +69,17 @@ __all__ = [
     "SessionStatus",
     "SessionSubmitAnswerResponse",
     "SubmitAnswerRequest",
+
+    # GitHub MCP schemas
+    "RepoEvidence",
+    "RepoFileContentResponse",
+    "RepoFileItem",
+    "RepoFileRequest",
+    "RepoFilesListResponse",
+    "RepoIdentifierRequest",
+    "RepoMetadataResponse",
+    "RepoQuestionRequest",
+    "RepoQuestionResponse",
+    "RepoReadmeResponse",
+    "parse_repo_identifier",
 ]
