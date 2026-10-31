@@ -1,0 +1,14 @@
+$kind: http-example
+name: Invalid session state, question unanswered, or maximum questions reached
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/next-question"
+  method: POST
+  pathVariables:
+    session_id: string
+response:
+  statusCode: 400
+  statusText: Bad Request
+  body:
+    type: text
+    content: ""
+order: 2000

@@ -1,0 +1,21 @@
+$kind: http-request
+description: Initialize a new interview session with configured role, level, difficulty, and total questions.
+url: "{{baseUrl}}/api/v1/interview/sessions"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "role": "string",
+      "experience_level": "Junior",
+      "difficulty": "Easy",
+      "topic": "string",
+      "question_type": "Technical",
+      "total_questions": 5
+    }
+settings: {}
+examples: ./.resources/Create Interview Session.resources/examples
+order: 2000

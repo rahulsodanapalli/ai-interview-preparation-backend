@@ -1,0 +1,11 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/health/db"
+  method: GET
+response:
+  statusCode: 503
+  statusText: Service Unavailable
+  body:
+    type: text
+    content: ""
+order: 2000

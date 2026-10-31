@@ -1,0 +1,1772 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "start",
+    "version": "1.0.0",
+    "description": "Backend API for the AI Interview Preparation Platform powered by FastAPI and local Qwen 2.5 on Ollama."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/api/v1/health/ollama": {
+      "get": {
+        "summary": "Ollama LLM Service Health Check",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "ollama_connected": {
+                      "type": "boolean"
+                    },
+                    "configured_model": {
+                      "type": "string"
+                    },
+                    "model_available": {
+                      "type": "boolean"
+                    },
+                    "available_models": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "status": "string",
+                  "ollama_connected": true,
+                  "configured_model": "string",
+                  "model_available": false,
+                  "available_models": [
+                    "string",
+                    "string"
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Ollama returned an unexpected or error response"
+          },
+          "503": {
+            "description": "Ollama service is unreachable or timed out"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "health",
+          "ollama"
+        ],
+        "description": "Checks whether the Ollama server is reachable and whether the configured model is installed."
+      }
+    },
+    "/api/v1/health/db": {
+      "get": {
+        "summary": "Database Connectivity Health Check",
+        "responses": {
+          "200": {
+            "description": "Database connection is operational and healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string"
+                    },
+                    "database_connected": {
+                      "type": "boolean"
+                    },
+                    "database_configured": {
+                      "type": "boolean"
+                    },
+                    "database": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "status": "string",
+                  "database_connected": false,
+                  "database_configured": false,
+                  "database": "postgresql"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Database is unreachable or not configured"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "health",
+          "db"
+        ],
+        "description": "Checks whether the PostgreSQL database connection is operational without exposing credentials."
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "summary": "Backend Health Check",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "app_name": {
+                      "type": "string"
+                    },
+                    "environment": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "app_name": "string",
+                  "environment": "string",
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "health"
+        ],
+        "description": "Returns the operational status and environment of the FastAPI backend."
+      }
+    },
+    "/api/v1/interview/question": {
+      "post": {
+        "summary": "Generate Structured Interview Question",
+        "responses": {
+          "200": {
+            "description": "Structured interview question generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "question": {
+                      "type": "string"
+                    },
+                    "expected_answer_points": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "follow_up_question": {
+                      "type": "string"
+                    },
+                    "difficulty": {
+                      "type": "string"
+                    },
+                    "topic": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "question": "string",
+                  "expected_answer_points": [
+                    "string"
+                  ],
+                  "follow_up_question": "string",
+                  "difficulty": "Easy",
+                  "topic": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error in request payload"
+          },
+          "502": {
+            "description": "Bad gateway or malformed response from AI model"
+          },
+          "503": {
+            "description": "Ollama service unavailable or timed out"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "question"
+        ],
+        "description": "Generates a tailored interview question with evaluation points and a follow-up question using the local Qwen 2.5 model via Ollama with guaranteed JSON structure.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "experience_level": {
+                    "type": "string"
+                  },
+                  "difficulty": {
+                    "type": "string"
+                  },
+                  "topic": {
+                    "type": "string"
+                  },
+                  "question_type": {
+                    "type": "string"
+                  }
+                }
+              },
+              "example": {
+                "role": "string",
+                "experience_level": "Senior",
+                "difficulty": "Hard",
+                "topic": "string",
+                "question_type": "Behavioral"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/interview/evaluate": {
+      "post": {
+        "summary": "Evaluate Interview Answer",
+        "responses": {
+          "200": {
+            "description": "Interview answer evaluated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "overall_score": {
+                      "type": "integer"
+                    },
+                    "rating": {
+                      "type": "string"
+                    },
+                    "sample_answer": {
+                      "type": "string"
+                    },
+                    "correct_points": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "missing_points": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "strengths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "improvements": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "overall_score": 4,
+                  "rating": "Fair",
+                  "sample_answer": "string",
+                  "correct_points": [
+                    "string",
+                    "string"
+                  ],
+                  "missing_points": [
+                    "string",
+                    "string"
+                  ],
+                  "strengths": [
+                    "string",
+                    "string"
+                  ],
+                  "improvements": [
+                    "string",
+                    "string"
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error in request payload"
+          },
+          "502": {
+            "description": "Bad gateway or malformed response from AI model"
+          },
+          "503": {
+            "description": "Ollama service unavailable or timed out"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "evaluate"
+        ],
+        "description": "Evaluates a candidate's answer against expected criteria using local Qwen 2.5 and returns structured feedback, strengths, improvements, and a rubric-aligned score.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "type": "string"
+                  },
+                  "expected_answer_points": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "candidate_answer": {
+                    "type": "string"
+                  }
+                }
+              },
+              "example": {
+                "question": "string",
+                "expected_answer_points": [
+                  "string"
+                ],
+                "candidate_answer": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/interview/sessions/{session_id}/next-question": {
+      "post": {
+        "summary": "Generate Next Interview Question for Session",
+        "responses": {
+          "200": {
+            "description": "Next question generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "question_number": {
+                      "type": "integer"
+                    },
+                    "total_questions": {
+                      "type": "integer"
+                    },
+                    "question": {
+                      "type": "string"
+                    },
+                    "expected_answer_points": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "difficulty": {
+                      "type": "string"
+                    },
+                    "topic": {
+                      "type": "string"
+                    },
+                    "follow_up_question": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "session_id": "string",
+                  "question_number": 5,
+                  "total_questions": 15,
+                  "question": "string",
+                  "expected_answer_points": [
+                    "string",
+                    "string"
+                  ],
+                  "difficulty": "Medium",
+                  "topic": "string",
+                  "follow_up_question": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session state, question unanswered, or maximum questions reached"
+          },
+          "404": {
+            "description": "Interview session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "loc": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            }
+                          },
+                          "msg": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string"
+                          },
+                          "input": {
+                            "type": "string"
+                          },
+                          "ctx": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        8560,
+                        "string"
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    },
+                    {
+                      "loc": [
+                        6037,
+                        4172
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad gateway from AI model"
+          },
+          "503": {
+            "description": "Ollama service unavailable or timed out"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions",
+          "{session_id}",
+          "next-question"
+        ],
+        "description": "Generate and advance to the next interview question using Qwen 2.5 on Ollama."
+      },
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "example": "string"
+        }
+      ]
+    },
+    "/api/v1/interview/sessions/{session_id}/answers": {
+      "post": {
+        "summary": "Submit and Evaluate Candidate Answer for Session",
+        "responses": {
+          "200": {
+            "description": "Answer evaluated and recorded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "question_number": {
+                      "type": "integer"
+                    },
+                    "completed_questions": {
+                      "type": "integer"
+                    },
+                    "total_questions": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "evaluation": {
+                      "type": "object",
+                      "properties": {
+                        "overall_score": {
+                          "type": "integer"
+                        },
+                        "rating": {
+                          "type": "string"
+                        },
+                        "sample_answer": {
+                          "type": "string"
+                        },
+                        "correct_points": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "missing_points": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "strengths": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "improvements": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "session_id": "string",
+                  "question_number": 13,
+                  "completed_questions": 3023,
+                  "total_questions": 19,
+                  "status": "in_progress",
+                  "evaluation": {
+                    "overall_score": 85,
+                    "rating": "Fair",
+                    "sample_answer": "string",
+                    "correct_points": [
+                      "string",
+                      "string"
+                    ],
+                    "missing_points": [
+                      "string",
+                      "string"
+                    ],
+                    "strengths": [
+                      "string",
+                      "string"
+                    ],
+                    "improvements": [
+                      "string",
+                      "string"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid session state, question already answered, or session completed"
+          },
+          "404": {
+            "description": "Interview session not found"
+          },
+          "422": {
+            "description": "Validation error in submitted answer"
+          },
+          "502": {
+            "description": "Bad gateway from AI model"
+          },
+          "503": {
+            "description": "Ollama service unavailable or timed out"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions",
+          "{session_id}",
+          "answers"
+        ],
+        "description": "Submit candidate answer for the active session question and evaluate it using Qwen 2.5 on Ollama.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "candidate_answer": {
+                    "type": "string"
+                  },
+                  "question_number": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "candidate_answer": "string",
+                "question_number": 5
+              }
+            }
+          }
+        }
+      },
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "example": "string"
+        }
+      ]
+    },
+    "/api/v1/interview/sessions/{session_id}/complete": {
+      "post": {
+        "summary": "Complete Interview Session and Generate Summary",
+        "responses": {
+          "200": {
+            "description": "Session completed and summary generated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "topic": {
+                      "type": "string"
+                    },
+                    "total_questions": {
+                      "type": "integer"
+                    },
+                    "questions_answered": {
+                      "type": "integer"
+                    },
+                    "average_score": {
+                      "type": "number"
+                    },
+                    "overall_rating": {
+                      "type": "string"
+                    },
+                    "session_status": {
+                      "type": "string"
+                    },
+                    "aggregated_strengths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "aggregated_improvement_areas": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "session_id": "string",
+                  "role": "string",
+                  "topic": "string",
+                  "total_questions": 6,
+                  "questions_answered": 7577,
+                  "average_score": 77.70236094100392,
+                  "overall_rating": "Good",
+                  "session_status": "in_progress",
+                  "aggregated_strengths": [
+                    "string",
+                    "string"
+                  ],
+                  "aggregated_improvement_areas": [
+                    "string",
+                    "string"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Interview session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "loc": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            }
+                          },
+                          "msg": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string"
+                          },
+                          "input": {
+                            "type": "string"
+                          },
+                          "ctx": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        8560,
+                        "string"
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    },
+                    {
+                      "loc": [
+                        6037,
+                        4172
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions",
+          "{session_id}",
+          "complete"
+        ],
+        "description": "Mark session as completed and calculate overall score, rubric rating, strengths, and improvement areas."
+      },
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "example": "string"
+        }
+      ]
+    },
+    "/api/v1/interview/sessions/{session_id}": {
+      "get": {
+        "summary": "Get Interview Session Details",
+        "responses": {
+          "200": {
+            "description": "Session details retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "experience_level": {
+                      "type": "string"
+                    },
+                    "difficulty": {
+                      "type": "string"
+                    },
+                    "topic": {
+                      "type": "string"
+                    },
+                    "question_type": {
+                      "type": "string"
+                    },
+                    "total_questions": {
+                      "type": "integer"
+                    },
+                    "completed_questions": {
+                      "type": "integer"
+                    },
+                    "current_question_number": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    },
+                    "questions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "question_number": {
+                            "type": "integer"
+                          },
+                          "question": {
+                            "type": "string"
+                          },
+                          "expected_answer_points": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "difficulty": {
+                            "type": "string"
+                          },
+                          "topic": {
+                            "type": "string"
+                          },
+                          "follow_up_question": {
+                            "type": "string"
+                          },
+                          "candidate_answer": {
+                            "type": "string"
+                          },
+                          "evaluation": {
+                            "type": "object",
+                            "properties": {
+                              "overall_score": {
+                                "type": "integer"
+                              },
+                              "rating": {
+                                "type": "string"
+                              },
+                              "sample_answer": {
+                                "type": "string"
+                              },
+                              "correct_points": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "missing_points": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "strengths": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "improvements": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "session_id": "string",
+                  "role": "string",
+                  "experience_level": "Mid-Level",
+                  "difficulty": "Hard",
+                  "topic": "string",
+                  "question_type": "Behavioral",
+                  "total_questions": 15,
+                  "completed_questions": 2452,
+                  "current_question_number": 8285,
+                  "status": "in_progress",
+                  "created_at": "string",
+                  "updated_at": "string",
+                  "questions": [
+                    {
+                      "question_number": 4,
+                      "question": "string",
+                      "expected_answer_points": [
+                        "string"
+                      ],
+                      "difficulty": "Hard",
+                      "topic": "string",
+                      "follow_up_question": "string",
+                      "candidate_answer": "string",
+                      "evaluation": {
+                        "overall_score": 21,
+                        "rating": "Fair",
+                        "sample_answer": "string",
+                        "correct_points": [
+                          "string",
+                          "string"
+                        ],
+                        "missing_points": [
+                          "string",
+                          "string"
+                        ],
+                        "strengths": [
+                          "string",
+                          "string"
+                        ],
+                        "improvements": [
+                          "string",
+                          "string"
+                        ]
+                      }
+                    },
+                    {
+                      "question_number": 12,
+                      "question": "string",
+                      "expected_answer_points": [
+                        "string"
+                      ],
+                      "difficulty": "Easy",
+                      "topic": "string",
+                      "follow_up_question": "string",
+                      "candidate_answer": "string",
+                      "evaluation": {
+                        "overall_score": 52,
+                        "rating": "Needs Improvement",
+                        "sample_answer": "string",
+                        "correct_points": [
+                          "string",
+                          "string"
+                        ],
+                        "missing_points": [
+                          "string",
+                          "string"
+                        ],
+                        "strengths": [
+                          "string",
+                          "string"
+                        ],
+                        "improvements": [
+                          "string",
+                          "string"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Interview session not found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "loc": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            }
+                          },
+                          "msg": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string"
+                          },
+                          "input": {
+                            "type": "string"
+                          },
+                          "ctx": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        8560,
+                        "string"
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    },
+                    {
+                      "loc": [
+                        6037,
+                        4172
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions",
+          "{session_id}"
+        ],
+        "description": "Retrieve full details, question history, and progress for an interview session."
+      },
+      "parameters": [
+        {
+          "name": "session_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "example": "string"
+        }
+      ]
+    },
+    "/api/v1/interview/sessions": {
+      "post": {
+        "summary": "Create Interview Session",
+        "responses": {
+          "201": {
+            "description": "Session created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "experience_level": {
+                      "type": "string"
+                    },
+                    "difficulty": {
+                      "type": "string"
+                    },
+                    "topic": {
+                      "type": "string"
+                    },
+                    "question_type": {
+                      "type": "string"
+                    },
+                    "total_questions": {
+                      "type": "integer"
+                    },
+                    "completed_questions": {
+                      "type": "integer"
+                    },
+                    "current_question_number": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "created_at": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string"
+                    },
+                    "questions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "question_number": {
+                            "type": "integer"
+                          },
+                          "question": {
+                            "type": "string"
+                          },
+                          "expected_answer_points": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "difficulty": {
+                            "type": "string"
+                          },
+                          "topic": {
+                            "type": "string"
+                          },
+                          "follow_up_question": {
+                            "type": "string"
+                          },
+                          "candidate_answer": {
+                            "type": "string"
+                          },
+                          "evaluation": {
+                            "type": "object",
+                            "properties": {
+                              "overall_score": {
+                                "type": "integer"
+                              },
+                              "rating": {
+                                "type": "string"
+                              },
+                              "sample_answer": {
+                                "type": "string"
+                              },
+                              "correct_points": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "missing_points": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "strengths": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              },
+                              "improvements": {
+                                "type": "array",
+                                "items": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "session_id": "string",
+                  "role": "string",
+                  "experience_level": "Mid-Level",
+                  "difficulty": "Medium",
+                  "topic": "string",
+                  "question_type": "Behavioral",
+                  "total_questions": 18,
+                  "completed_questions": 8396,
+                  "current_question_number": 6417,
+                  "status": "completed",
+                  "created_at": "string",
+                  "updated_at": "string",
+                  "questions": [
+                    {
+                      "question_number": 8,
+                      "question": "string",
+                      "expected_answer_points": [
+                        "string"
+                      ],
+                      "difficulty": "Easy",
+                      "topic": "string",
+                      "follow_up_question": "string",
+                      "candidate_answer": "string",
+                      "evaluation": {
+                        "overall_score": 91,
+                        "rating": "Good",
+                        "sample_answer": "string",
+                        "correct_points": [
+                          "string",
+                          "string"
+                        ],
+                        "missing_points": [
+                          "string",
+                          "string"
+                        ],
+                        "strengths": [
+                          "string",
+                          "string"
+                        ],
+                        "improvements": [
+                          "string",
+                          "string"
+                        ]
+                      }
+                    },
+                    {
+                      "question_number": 19,
+                      "question": "string",
+                      "expected_answer_points": [
+                        "string"
+                      ],
+                      "difficulty": "Hard",
+                      "topic": "string",
+                      "follow_up_question": "string",
+                      "candidate_answer": "string",
+                      "evaluation": {
+                        "overall_score": 18,
+                        "rating": "Needs Improvement",
+                        "sample_answer": "string",
+                        "correct_points": [
+                          "string",
+                          "string"
+                        ],
+                        "missing_points": [
+                          "string",
+                          "string"
+                        ],
+                        "strengths": [
+                          "string",
+                          "string"
+                        ],
+                        "improvements": [
+                          "string",
+                          "string"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error in session configuration"
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions"
+        ],
+        "description": "Initialize a new interview session with configured role, level, difficulty, and total questions.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "role": {
+                    "type": "string"
+                  },
+                  "experience_level": {
+                    "type": "string"
+                  },
+                  "difficulty": {
+                    "type": "string"
+                  },
+                  "topic": {
+                    "type": "string"
+                  },
+                  "question_type": {
+                    "type": "string"
+                  },
+                  "total_questions": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "example": {
+                "role": "string",
+                "experience_level": "Junior",
+                "difficulty": "Easy",
+                "topic": "string",
+                "question_type": "Technical",
+                "total_questions": 5
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List Interview Sessions",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 50
+          },
+          {
+            "name": "skip",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            },
+            "example": 0
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of interview sessions retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "session_id": {
+                        "type": "string"
+                      },
+                      "role": {
+                        "type": "string"
+                      },
+                      "experience_level": {
+                        "type": "string"
+                      },
+                      "difficulty": {
+                        "type": "string"
+                      },
+                      "topic": {
+                        "type": "string"
+                      },
+                      "question_type": {
+                        "type": "string"
+                      },
+                      "total_questions": {
+                        "type": "integer"
+                      },
+                      "completed_questions": {
+                        "type": "integer"
+                      },
+                      "current_question_number": {
+                        "type": "integer"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "created_at": {
+                        "type": "string"
+                      },
+                      "updated_at": {
+                        "type": "string"
+                      },
+                      "questions": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "question_number": {
+                              "type": "integer"
+                            },
+                            "question": {
+                              "type": "string"
+                            },
+                            "expected_answer_points": {
+                              "type": "array",
+                              "items": {
+                                "type": "string"
+                              }
+                            },
+                            "difficulty": {
+                              "type": "string"
+                            },
+                            "topic": {
+                              "type": "string"
+                            },
+                            "follow_up_question": {
+                              "type": "string"
+                            },
+                            "candidate_answer": {
+                              "type": "string"
+                            },
+                            "evaluation": {
+                              "type": "object",
+                              "properties": {
+                                "overall_score": {
+                                  "type": "integer"
+                                },
+                                "rating": {
+                                  "type": "string"
+                                },
+                                "sample_answer": {
+                                  "type": "string"
+                                },
+                                "correct_points": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                },
+                                "missing_points": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                },
+                                "strengths": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                },
+                                "improvements": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": [
+                  {
+                    "session_id": "string",
+                    "role": "string",
+                    "experience_level": "Fresher",
+                    "difficulty": "Easy",
+                    "topic": "string",
+                    "question_type": "Scenario-Based",
+                    "total_questions": 7,
+                    "completed_questions": 7705,
+                    "current_question_number": 3882,
+                    "status": "in_progress",
+                    "created_at": "string",
+                    "updated_at": "string",
+                    "questions": [
+                      {
+                        "question_number": 15,
+                        "question": "string",
+                        "expected_answer_points": [
+                          "string"
+                        ],
+                        "difficulty": "Easy",
+                        "topic": "string",
+                        "follow_up_question": "string",
+                        "candidate_answer": "string",
+                        "evaluation": {
+                          "overall_score": 20,
+                          "rating": "Needs Improvement",
+                          "sample_answer": "string",
+                          "correct_points": [
+                            "string",
+                            "string"
+                          ],
+                          "missing_points": [
+                            "string",
+                            "string"
+                          ],
+                          "strengths": [
+                            "string",
+                            "string"
+                          ],
+                          "improvements": [
+                            "string",
+                            "string"
+                          ]
+                        }
+                      },
+                      {
+                        "question_number": 13,
+                        "question": "string",
+                        "expected_answer_points": [
+                          "string"
+                        ],
+                        "difficulty": "Medium",
+                        "topic": "string",
+                        "follow_up_question": "string",
+                        "candidate_answer": "string",
+                        "evaluation": {
+                          "overall_score": 90,
+                          "rating": "Needs Improvement",
+                          "sample_answer": "string",
+                          "correct_points": [
+                            "string",
+                            "string"
+                          ],
+                          "missing_points": [
+                            "string",
+                            "string"
+                          ],
+                          "strengths": [
+                            "string",
+                            "string"
+                          ],
+                          "improvements": [
+                            "string",
+                            "string"
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "session_id": "string",
+                    "role": "string",
+                    "experience_level": "Fresher",
+                    "difficulty": "Easy",
+                    "topic": "string",
+                    "question_type": "Scenario-Based",
+                    "total_questions": 2,
+                    "completed_questions": 3986,
+                    "current_question_number": 133,
+                    "status": "in_progress",
+                    "created_at": "string",
+                    "updated_at": "string",
+                    "questions": [
+                      {
+                        "question_number": 12,
+                        "question": "string",
+                        "expected_answer_points": [
+                          "string"
+                        ],
+                        "difficulty": "Medium",
+                        "topic": "string",
+                        "follow_up_question": "string",
+                        "candidate_answer": "string",
+                        "evaluation": {
+                          "overall_score": 79,
+                          "rating": "Good",
+                          "sample_answer": "string",
+                          "correct_points": [
+                            "string",
+                            "string"
+                          ],
+                          "missing_points": [
+                            "string",
+                            "string"
+                          ],
+                          "strengths": [
+                            "string",
+                            "string"
+                          ],
+                          "improvements": [
+                            "string",
+                            "string"
+                          ]
+                        }
+                      },
+                      {
+                        "question_number": 8,
+                        "question": "string",
+                        "expected_answer_points": [
+                          "string"
+                        ],
+                        "difficulty": "Easy",
+                        "topic": "string",
+                        "follow_up_question": "string",
+                        "candidate_answer": "string",
+                        "evaluation": {
+                          "overall_score": 80,
+                          "rating": "Fair",
+                          "sample_answer": "string",
+                          "correct_points": [
+                            "string",
+                            "string"
+                          ],
+                          "missing_points": [
+                            "string",
+                            "string"
+                          ],
+                          "strengths": [
+                            "string",
+                            "string"
+                          ],
+                          "improvements": [
+                            "string",
+                            "string"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "loc": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer"
+                            }
+                          },
+                          "msg": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string"
+                          },
+                          "input": {
+                            "type": "string"
+                          },
+                          "ctx": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        8560,
+                        "string"
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    },
+                    {
+                      "loc": [
+                        6037,
+                        4172
+                      ],
+                      "msg": "string",
+                      "type": "string",
+                      "input": "",
+                      "ctx": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "api",
+          "v1",
+          "interview",
+          "sessions"
+        ],
+        "description": "Retrieve a paginated list of interview sessions ordered by most recent."
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "API Root",
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          }
+        },
+        "tags": [
+          "/"
+        ],
+        "description": "Returns a welcome message and links to API documentation."
+      }
+    }
+  }
+}

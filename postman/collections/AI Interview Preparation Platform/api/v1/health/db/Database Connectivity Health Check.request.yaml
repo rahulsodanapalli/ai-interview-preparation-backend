@@ -1,0 +1,12 @@
+$kind: http-request
+description: Checks whether the PostgreSQL database connection is operational without exposing credentials.
+url: "{{baseUrl}}/api/v1/health/db"
+method: GET
+headers:
+  Accept: application/json
+body:
+  type: json
+  content: ""
+settings: {}
+examples: ./.resources/Database Connectivity Health Check.resources/examples
+order: 1000

@@ -1,0 +1,11 @@
+$kind: http-request
+description: Retrieve full details, question history, and progress for an interview session.
+url: "{{baseUrl}}/api/v1/interview/sessions/:session_id"
+method: GET
+headers:
+  Accept: application/json
+pathVariables:
+  session_id: string
+settings: {}
+examples: ./.resources/Get Interview Session Details.resources/examples
+order: 4000

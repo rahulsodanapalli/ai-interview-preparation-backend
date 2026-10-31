@@ -20,3 +20,13 @@ class OllamaHealthResponse(BaseModel):
     available_models: List[str] = Field(
         default_factory=list, description="List of all locally installed Ollama models"
     )
+
+
+class DatabaseHealthResponse(BaseModel):
+    """Response schema for database connectivity health status."""
+
+    status: str = Field(..., description="Database health status ('ok' or 'unhealthy')")
+    database: str = Field(default="postgresql", description="Database provider type")
+    database_connected: bool = Field(..., description="Whether database connection was successfully established")
+    database_configured: bool = Field(..., description="Whether DATABASE_URL is configured in environment")
+

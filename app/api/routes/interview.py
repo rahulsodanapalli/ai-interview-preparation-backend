@@ -1,10 +1,19 @@
 import json
 import logging
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import ValidationError
+from sqlalchemy.orm import Session
 
+from app.db.session import get_db_optional
+
+from app.schemas.document import (
+    SourceQuestionsRequest,
+    SourceQuestionsResponse,
+)
 from app.schemas.interview import (
+    DocumentQuestionRequest,
+    DocumentQuestionResponse,
     InterviewEvaluationRequest,
     InterviewEvaluationResponse,
     InterviewQuestionRequest,
@@ -19,12 +28,37 @@ from app.schemas.session import (
     SessionSubmitAnswerResponse,
     SubmitAnswerRequest,
 )
+from app.services.embedding_service import (
+    EmbeddingConnectionError,
+    EmbeddingTimeoutError,
+)
 from app.services.ollama_service import (
     OllamaConnectionError,
     OllamaResponseError,
     OllamaService,
     OllamaTimeoutError,
     get_ollama_service,
+)
+from app.services.pinecone_service import (
+    PineconeConfigurationError,
+    PineconeConnectionError,
+    PineconeDimensionMismatchError,
+    PineconeIndexNotFoundError,
+    PineconeResponseError,
+    PineconeTimeoutError,
+)
+from app.services.rag_question_service import (
+    RAGQuestionService,
+    SourceInsufficientContentError,
+    get_rag_question_service,
+)
+from app.services.source_service import (
+    SourceNotFoundError,
+    SourceNotReadyError,
+)
+from app.services.retrieval_service import (
+    EmptyQueryError,
+    InvalidDocumentIdError,
 )
 from app.services.session_service import (
     SessionNotFoundError,
@@ -250,6 +284,146 @@ async def generate_interview_question(
 
 
 @router.post(
+    "/document-question",
+    response_model=DocumentQuestionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate Document-Grounded Interview Question (RAG)",
+    description=(
+        "Retrieves the most relevant technical chunks from an uploaded document in Pinecone "
+        "and generates a tailored interview question strictly grounded in the candidate's "
+        "documented experience and skills."
+    ),
+    responses={
+        200: {
+            "description": "Document-grounded question generated successfully",
+            "model": DocumentQuestionResponse,
+        },
+        400: {"description": "Invalid document ID or query parameters"},
+        422: {"description": "Validation error in request payload"},
+        500: {"description": "Internal model output or vector processing error"},
+        502: {"description": "Bad gateway or malformed JSON from Ollama model"},
+        503: {"description": "Pinecone or Ollama service is unavailable"},
+    },
+)
+async def generate_document_interview_question(
+    payload: DocumentQuestionRequest,
+    rag_service: RAGQuestionService = Depends(get_rag_question_service),
+) -> DocumentQuestionResponse:
+    """Generate a tailored interview question grounded in candidate document chunks from Pinecone."""
+    if not payload.document_id or not payload.document_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'document_id' is required in request payload.",
+        )
+
+    try:
+        return await rag_service.generate_document_question(payload)
+    except (InvalidDocumentIdError, EmptyQueryError) as exc:
+        logger.warning("Invalid RAG question request parameter: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
+        logger.error("Embedding service unavailable during document question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding service is currently unavailable. Please verify Ollama is running.",
+        ) from exc
+    except (PineconeConnectionError, PineconeTimeoutError) as exc:
+        logger.error("Pinecone service unavailable during document question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Pinecone vector storage service is currently unavailable.",
+        ) from exc
+    except (OllamaConnectionError, OllamaTimeoutError) as exc:
+        logger.error("Ollama inference service unavailable during RAG question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI inference service is currently unavailable. Please verify Ollama is running.",
+        ) from exc
+    except (
+        PineconeConfigurationError,
+        PineconeDimensionMismatchError,
+        PineconeIndexNotFoundError,
+        PineconeResponseError,
+    ) as exc:
+        logger.error("Pinecone storage error during document question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pinecone vector storage error: {exc}",
+        ) from exc
+    except OllamaResponseError as exc:
+        logger.error("Ollama response error during document question generation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to generate interview question from the local AI model.",
+        ) from exc
+    except ValidationError as exc:
+        logger.error("RAG question output failed schema validation: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI model returned data that does not match the required question format.",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Unexpected error during document question generation: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected internal error occurred while generating the document question.",
+        ) from exc
+
+
+@router.post(
+    "/source-questions",
+    response_model=SourceQuestionsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate Multiple Source-Grounded Interview Questions",
+    description="Generates multiple structured interview questions grounded in chunks retrieved for a selected source ID.",
+    responses={
+        200: {"description": "Grounded interview questions generated successfully"},
+        400: {"description": "Source not ready or insufficient content"},
+        404: {"description": "Source not found"},
+        422: {"description": "Missing source_id in payload"},
+        502: {"description": "Bad gateway from AI model"},
+        503: {"description": "Ollama or Pinecone unavailable"},
+    },
+)
+async def generate_source_interview_questions(
+    payload: SourceQuestionsRequest,
+    rag_service: RAGQuestionService = Depends(get_rag_question_service),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> SourceQuestionsResponse:
+    """Generate structured interview questions grounded in source content."""
+    if not payload.source_id or not payload.source_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'source_id' is required in request payload.",
+        )
+    try:
+        return await rag_service.generate_source_questions(payload, db=db)
+    except SourceNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (SourceNotReadyError, SourceInsufficientContentError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Embedding service unavailable: {exc}") from exc
+    except (PineconeConnectionError, PineconeTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Pinecone service unavailable: {exc}") from exc
+    except (OllamaConnectionError, OllamaTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"AI model service unavailable: {exc}") from exc
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Unexpected error generating source questions: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected internal error occurred while generating interview questions.",
+        ) from exc
+
+
+@router.post(
     "/evaluate",
     response_model=InterviewEvaluationResponse,
     status_code=status.HTTP_200_OK,
@@ -283,7 +457,7 @@ async def evaluate_interview_answer(
     response_model=SessionDetailResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create Interview Session",
-    description="Initialize a new in-memory interview session with configured role, level, difficulty, and total questions.",
+    description="Initialize a new interview session with configured role, level, difficulty, and total questions.",
     responses={
         201: {"description": "Session created successfully"},
         422: {"description": "Validation error in session configuration"},
@@ -292,9 +466,30 @@ async def evaluate_interview_answer(
 async def create_session(
     payload: CreateSessionRequest,
     session_service: SessionService = Depends(get_session_service),
+    db: Optional[Session] = Depends(get_db_optional),
 ) -> SessionDetailResponse:
     """Create a new interview session."""
-    return session_service.create_session(payload)
+    return session_service.create_session(payload, db=db)
+
+
+@router.get(
+    "/sessions",
+    response_model=List[SessionDetailResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Interview Sessions",
+    description="Retrieve a paginated list of interview sessions ordered by most recent.",
+    responses={
+        200: {"description": "List of interview sessions retrieved successfully"},
+    },
+)
+async def list_sessions(
+    limit: int = 50,
+    skip: int = 0,
+    session_service: SessionService = Depends(get_session_service),
+    db: Optional[Session] = Depends(get_db_optional),
+) -> List[SessionDetailResponse]:
+    """Retrieve list of interview sessions with optional pagination."""
+    return session_service.list_sessions(db=db, limit=limit, skip=skip)
 
 
 @router.get(
@@ -311,10 +506,11 @@ async def create_session(
 async def get_session(
     session_id: str,
     session_service: SessionService = Depends(get_session_service),
+    db: Optional[Session] = Depends(get_db_optional),
 ) -> SessionDetailResponse:
     """Retrieve session details and current progress."""
     try:
-        return session_service.get_session(session_id)
+        return session_service.get_session(session_id, db=db)
     except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -340,10 +536,11 @@ async def get_next_question_for_session(
     session_id: str,
     session_service: SessionService = Depends(get_session_service),
     ollama_service: OllamaService = Depends(get_ollama_service),
+    db: Optional[Session] = Depends(get_db_optional),
 ) -> SessionNextQuestionResponse:
     """Generate the next interview question for the session using Qwen 2.5."""
     try:
-        session = session_service.validate_can_generate_question(session_id)
+        session = session_service.validate_can_generate_question(session_id, db=db)
     except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -365,7 +562,7 @@ async def get_next_question_for_session(
     )
 
     question_data = await _execute_question_generation(question_payload, ollama_service)
-    return session_service.add_question_to_session(session_id, question_data)
+    return session_service.add_question_to_session(session_id, question_data, db=db)
 
 
 @router.post(
@@ -388,12 +585,14 @@ async def submit_answer_for_session(
     payload: SubmitAnswerRequest,
     session_service: SessionService = Depends(get_session_service),
     ollama_service: OllamaService = Depends(get_ollama_service),
+    db: Optional[Session] = Depends(get_db_optional),
 ) -> SessionSubmitAnswerResponse:
     """Submit candidate answer and evaluate against expected criteria."""
     try:
         target_question = session_service.validate_can_submit_answer(
             session_id=session_id,
             question_number=payload.question_number,
+            db=db,
         )
     except SessionNotFoundError as exc:
         raise HTTPException(
@@ -418,6 +617,7 @@ async def submit_answer_for_session(
         question_number=target_question.question_number,
         candidate_answer=payload.candidate_answer,
         evaluation=evaluation,
+        db=db,
     )
 
 
@@ -435,12 +635,14 @@ async def submit_answer_for_session(
 async def complete_session(
     session_id: str,
     session_service: SessionService = Depends(get_session_service),
+    db: Optional[Session] = Depends(get_db_optional),
 ) -> InterviewSessionSummaryResponse:
     """Complete the session and produce final interview summary."""
     try:
-        return session_service.complete_session(session_id)
+        return session_service.complete_session(session_id, db=db)
     except SessionNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+

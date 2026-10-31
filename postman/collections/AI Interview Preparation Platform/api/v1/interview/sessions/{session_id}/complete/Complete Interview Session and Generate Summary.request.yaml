@@ -1,0 +1,11 @@
+$kind: http-request
+description: Mark session as completed and calculate overall score, rubric rating, strengths, and improvement areas.
+url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/complete"
+method: POST
+headers:
+  Accept: application/json
+pathVariables:
+  session_id: string
+settings: {}
+examples: ./.resources/Complete Interview Session and Generate Summary.resources/examples
+order: 1000

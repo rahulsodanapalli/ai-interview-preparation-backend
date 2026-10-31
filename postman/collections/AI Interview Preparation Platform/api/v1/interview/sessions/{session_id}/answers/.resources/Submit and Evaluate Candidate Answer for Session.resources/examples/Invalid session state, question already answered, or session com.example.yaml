@@ -1,0 +1,23 @@
+$kind: http-example
+name: Invalid session state, question already answered, or session completed
+request:
+  url: "{{baseUrl}}/api/v1/interview/sessions/:session_id/answers"
+  method: POST
+  headers:
+    Content-Type: application/json
+  pathVariables:
+    session_id: string
+  body:
+    type: json
+    content: |-
+      {
+        "candidate_answer": "string",
+        "question_number": 5
+      }
+response:
+  statusCode: 400
+  statusText: Bad Request
+  body:
+    type: text
+    content: ""
+order: 2000

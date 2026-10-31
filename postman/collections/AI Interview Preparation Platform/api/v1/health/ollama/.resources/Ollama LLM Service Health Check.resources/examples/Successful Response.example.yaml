@@ -1,0 +1,25 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/api/v1/health/ollama"
+  method: GET
+  headers:
+    Accept: application/json
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "status": "string",
+        "ollama_connected": true,
+        "configured_model": "string",
+        "model_available": false,
+        "available_models": [
+          "string",
+          "string"
+        ]
+      }
+order: 1000
