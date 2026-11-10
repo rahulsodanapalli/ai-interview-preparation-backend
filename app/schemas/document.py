@@ -76,6 +76,10 @@ class DocumentUploadResponse(BaseModel):
         description="Total number of vector embeddings stored in Pinecone.",
         ge=0,
     )
+    questions: Optional[List[Any]] = Field(
+        default=None,
+        description="Automatically generated questions if available upon upload completion.",
+    )
     message: str = Field(
         default="Document text extracted and processed successfully.",
         description="Informational status message summarizing the extraction and storage result.",
@@ -169,6 +173,10 @@ class SourceUploadResponse(BaseModel):
         default="",
         description="Safe excerpt preview of the extracted content (up to 500 characters).",
     )
+    questions: Optional[List[Any]] = Field(
+        default=None,
+        description="Automatically generated questions if available upon ingestion completion.",
+    )
     message: str = Field(
         default="Source content extracted, embedded, and indexed successfully.",
         description="Informational status message summarizing processing results.",
@@ -239,15 +247,15 @@ class SourceQuestionsRequest(BaseModel):
         description="Unique source ID (if not provided in the URL path)",
     )
     role: Optional[str] = Field(
-        default="Software Engineer",
+        default="General Technical Interview",
         min_length=2,
         max_length=100,
         description="Target job role for question generation",
-        examples=["Full Stack Developer"],
+        examples=["General Technical Interview"],
     )
     experience_level: ExperienceLevel = Field(
-        default=ExperienceLevel.MID_LEVEL,
-        description="Candidate experience level (Fresher, Junior, Mid-Level, Senior)",
+        default=ExperienceLevel.INTERMEDIATE,
+        description="Candidate experience level (Fresher, Junior, Mid-Level, Intermediate, Senior)",
     )
     difficulty: DifficultyLevel = Field(
         default=DifficultyLevel.MEDIUM,
@@ -264,10 +272,14 @@ class SourceQuestionsRequest(BaseModel):
         description="Question category type",
     )
     count: int = Field(
-        default=3,
+        default=5,
         ge=1,
-        le=10,
-        description="Number of structured questions to generate (between 1 and 10, default 3)",
+        le=20,
+        description="Number of structured questions to generate (between 1 and 20, default 5)",
+    )
+    force_regenerate: bool = Field(
+        default=False,
+        description="Whether to bypass cached questions and regenerate new ones",
     )
 
 

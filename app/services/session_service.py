@@ -1,10 +1,9 @@
-"""
-Interview Session Management Service with Database Persistence.
+"""Interview Session Management Service with Database Persistence.
 
 This service coordinates interview lifecycles, question sequencing, answer evaluation
-tracking, and performance summaries. It persists state to PostgreSQL when a database
-session is provided, while maintaining in-memory caching and backward compatibility
-for unit tests.
+tracking, and performance summaries. It delegates relational persistence to
+InterviewRepository when a database session is provided, while maintaining
+in-memory caching for fast lookups and offline/unit-test compatibility.
 """
 
 from datetime import datetime, timezone
@@ -12,11 +11,10 @@ import logging
 from typing import Dict, List, Optional
 import uuid
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
-
-from app.models.interview import AnswerEvaluation, InterviewQuestion, InterviewSession
+from app.models.interview import InterviewSession
+from app.repositories.interview_repository import InterviewRepository
 from app.schemas.interview import (
     DifficultyLevel,
     EvaluationRating,
@@ -34,22 +32,21 @@ from app.schemas.session import (
     SessionStatus,
     SessionSubmitAnswerResponse,
 )
+from app.utils.identifiers import enum_to_value
 
 logger = logging.getLogger(__name__)
 
 
 class SessionNotFoundError(Exception):
     """Raised when an interview session ID is not found in the store or database."""
-    pass
 
 
 class SessionStateError(Exception):
     """Raised when an invalid session lifecycle transition or state rule is violated."""
-    pass
 
 
 def _db_model_to_session_detail(session_db: InterviewSession) -> SessionDetailResponse:
-    """Helper to convert an InterviewSession database model to a SessionDetailResponse schema."""
+    """Convert an InterviewSession ORM model into a SessionDetailResponse schema."""
     questions_list: List[SessionQuestionItem] = []
     sorted_questions = sorted(session_db.questions, key=lambda q: q.order)
 
@@ -78,6 +75,7 @@ def _db_model_to_session_detail(session_db: InterviewSession) -> SessionDetailRe
             )
         )
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     return SessionDetailResponse(
         session_id=session_db.id,
         role=session_db.role,
@@ -91,75 +89,86 @@ def _db_model_to_session_detail(session_db: InterviewSession) -> SessionDetailRe
         source_id=getattr(session_db, "source_id", None),
         status=SessionStatus(session_db.status),
         questions=questions_list,
-        created_at=session_db.created_at.isoformat() if session_db.created_at else datetime.now(timezone.utc).isoformat(),
-        updated_at=session_db.updated_at.isoformat() if session_db.updated_at else datetime.now(timezone.utc).isoformat(),
+        created_at=session_db.created_at.isoformat() if session_db.created_at else now_iso,
+        updated_at=session_db.updated_at.isoformat() if session_db.updated_at else now_iso,
     )
 
 
 class SessionService:
-    """
-    Session manager handling interview lifecycles, question sequencing,
-    answer evaluation tracking, and session summaries with PostgreSQL persistence.
-    """
+    """Session manager handling interview lifecycles, question sequencing, and summaries."""
 
-    def __init__(self) -> None:
+    DUPLICATE_WINDOW_SECONDS = 10.0
+
+    def __init__(self, repository: Optional[InterviewRepository] = None) -> None:
         self._sessions: Dict[str, SessionDetailResponse] = {}
+        self._repository = repository or InterviewRepository()
+
+    def _find_recent_duplicate_session(
+        self,
+        payload: CreateSessionRequest,
+    ) -> Optional[SessionDetailResponse]:
+        """Return an existing in-progress source session if created within the dedup window."""
+        if not payload.source_id:
+            return None
+
+        now_dt = datetime.now(timezone.utc)
+        for existing in self._sessions.values():
+            if (
+                existing.source_id == payload.source_id
+                and existing.role == payload.role
+                and existing.topic == payload.topic
+                and existing.status == SessionStatus.IN_PROGRESS
+            ):
+                try:
+                    created_dt = datetime.fromisoformat(existing.created_at)
+                    if (now_dt - created_dt).total_seconds() < self.DUPLICATE_WINDOW_SECONDS:
+                        logger.info(
+                            "Duplicate session creation detected for source '%s'; returning existing session '%s'.",
+                            payload.source_id,
+                            existing.session_id,
+                        )
+                        return existing
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _build_initial_questions(payload: CreateSessionRequest) -> List[SessionQuestionItem]:
+        """Build SessionQuestionItem objects from optional pre-generated questions."""
+        if not payload.questions:
+            return []
+        return [
+            SessionQuestionItem(
+                question_number=idx,
+                question=q_input.question,
+                expected_answer_points=q_input.expected_answer_points,
+                follow_up_question=q_input.follow_up_question,
+                difficulty=q_input.difficulty or payload.difficulty,
+                topic=q_input.topic or payload.topic,
+                candidate_answer=None,
+                evaluation=None,
+            )
+            for idx, q_input in enumerate(payload.questions, start=1)
+        ]
 
     def create_session(
         self,
         payload: CreateSessionRequest,
         db: Optional[Session] = None,
     ) -> SessionDetailResponse:
-        """
-        Create and initialize a new interview session.
-        Persists to database when db is provided; updates in-memory cache.
-        Supports linking to a source and initializing with pre-generated questions.
-        Prevents accidental duplicate session creation within a short time window.
-        """
-        # Accidental duplicate session prevention for source-based sessions
-        if payload.source_id:
-            now_dt = datetime.now(timezone.utc)
-            for existing in self._sessions.values():
-                if (
-                    existing.source_id == payload.source_id
-                    and existing.role == payload.role
-                    and existing.topic == payload.topic
-                    and existing.status == SessionStatus.IN_PROGRESS
-                ):
-                    try:
-                        created_dt = datetime.fromisoformat(existing.created_at)
-                        if (now_dt - created_dt).total_seconds() < 10.0:
-                            logger.info(
-                                "Duplicate session creation detected for source '%s'; returning existing session '%s'.",
-                                payload.source_id,
-                                existing.session_id,
-                            )
-                            return existing
-                    except Exception:
-                        pass
+        """Create and initialize a new interview session with optional pre-generated questions."""
+        duplicate = self._find_recent_duplicate_session(payload)
+        if duplicate is not None:
+            return duplicate
 
         session_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-
-        # Build pre-populated question items if provided in payload
-        questions_list: List[SessionQuestionItem] = []
-        if payload.questions:
-            for idx, q_input in enumerate(payload.questions, start=1):
-                q_diff = q_input.difficulty or payload.difficulty
-                questions_list.append(
-                    SessionQuestionItem(
-                        question_number=idx,
-                        question=q_input.question,
-                        expected_answer_points=q_input.expected_answer_points,
-                        follow_up_question=q_input.follow_up_question,
-                        difficulty=q_diff,
-                        topic=q_input.topic or payload.topic,
-                        candidate_answer=None,
-                        evaluation=None,
-                    )
-                )
-
-        total_questions = max(len(questions_list), payload.total_questions) if questions_list else payload.total_questions
+        questions_list = self._build_initial_questions(payload)
+        total_questions = (
+            max(len(questions_list), payload.total_questions)
+            if questions_list
+            else payload.total_questions
+        )
         current_question_number = 1 if questions_list else 0
 
         session = SessionDetailResponse(
@@ -178,63 +187,17 @@ class SessionService:
             created_at=now,
             updated_at=now,
         )
-
         self._sessions[session_id] = session
 
         if db is not None:
-            session_db = InterviewSession(
-                id=session_id,
-                role=payload.role,
-                experience_level=(
-                    payload.experience_level.value
-                    if hasattr(payload.experience_level, "value")
-                    else str(payload.experience_level)
-                ),
-                difficulty=(
-                    payload.difficulty.value
-                    if hasattr(payload.difficulty, "value")
-                    else str(payload.difficulty)
-                ),
-                topic=payload.topic,
-                question_type=(
-                    payload.question_type.value
-                    if hasattr(payload.question_type, "value")
-                    else str(payload.question_type)
-                ),
+            self._repository.create_session(
+                db,
+                session_id=session_id,
+                payload=payload,
                 total_questions=total_questions,
-                completed_questions=0,
                 current_question_number=current_question_number,
-                source_id=payload.source_id,
-                status=SessionStatus.IN_PROGRESS.value,
+                questions_list=questions_list,
             )
-            db.add(session_db)
-            db.flush()
-
-            # Persist pre-generated questions to the database
-            for q_item in questions_list:
-                q_db = InterviewQuestion(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    order=q_item.question_number,
-                    question=q_item.question,
-                    topic=q_item.topic,
-                    difficulty=(
-                        q_item.difficulty.value
-                        if hasattr(q_item.difficulty, "value")
-                        else str(q_item.difficulty)
-                    ),
-                    question_type=(
-                        payload.question_type.value
-                        if hasattr(payload.question_type, "value")
-                        else str(payload.question_type)
-                    ),
-                    expected_answer_points=q_item.expected_answer_points,
-                    follow_up_question=q_item.follow_up_question,
-                    candidate_answer=None,
-                )
-                db.add(q_db)
-            db.flush()
-            logger.info("Persisted session %s (with %d questions) to database.", session_id, len(questions_list))
 
         logger.info(
             "Created interview session %s for role '%s' on topic '%s' (source_id=%s).",
@@ -250,25 +213,13 @@ class SessionService:
         session_id: str,
         db: Optional[Session] = None,
     ) -> SessionDetailResponse:
-        """
-        Retrieve session details and current progress by session ID.
-        Checks database first if db is provided, falling back to in-memory store.
-        """
+        """Retrieve session details and current progress by session ID."""
         if db is not None:
-            session_db = db.get(InterviewSession, session_id)
+            session_db = self._repository.get_session_by_id(db, session_id)
             if session_db is not None:
-                stmt = (
-                    select(InterviewQuestion)
-                    .options(selectinload(InterviewQuestion.evaluation))
-                    .where(InterviewQuestion.session_id == session_id)
-                    .order_by(InterviewQuestion.order)
-                )
-                questions_db = list(db.execute(stmt).scalars().all())
-                session_db.questions = questions_db
                 session_resp = _db_model_to_session_detail(session_db)
                 self._sessions[session_id] = session_resp
                 return session_resp
-
 
         session = self._sessions.get(session_id)
         if not session:
@@ -282,29 +233,11 @@ class SessionService:
         limit: int = 50,
         skip: int = 0,
     ) -> List[SessionDetailResponse]:
-        """
-        Retrieve list of interview sessions ordered by creation date descending.
-        Retrieves from database when db is provided; otherwise returns in-memory sessions.
-        """
+        """Retrieve list of interview sessions ordered by creation date descending."""
         if db is not None:
-            stmt = (
-                select(InterviewSession)
-                .order_by(InterviewSession.created_at.desc())
-                .offset(skip)
-                .limit(limit)
-            )
-            sessions_db = list(db.execute(stmt).scalars().all())
-            result: List[SessionDetailResponse] = []
-            for s_db in sessions_db:
-                stmt_q = (
-                    select(InterviewQuestion)
-                    .options(selectinload(InterviewQuestion.evaluation))
-                    .where(InterviewQuestion.session_id == s_db.id)
-                    .order_by(InterviewQuestion.order)
-                )
-                s_db.questions = list(db.execute(stmt_q).scalars().all())
-                result.append(_db_model_to_session_detail(s_db))
-            return result
+            sessions_db = self._repository.list_sessions(db, limit=limit, skip=skip)
+            if sessions_db is not None:
+                return [_db_model_to_session_detail(s) for s in sessions_db]
 
         all_sessions = list(self._sessions.values())
         return all_sessions[skip : skip + limit]
@@ -314,15 +247,12 @@ class SessionService:
         session_id: str,
         db: Optional[Session] = None,
     ) -> SessionDetailResponse:
-        """
-        Validate that the session is in a valid state to generate the next question.
-        """
+        """Validate that the session is in a valid state to generate the next question."""
         session = self.get_session(session_id, db=db)
 
         if session.status == SessionStatus.COMPLETED:
             raise SessionStateError("Cannot generate next question: interview session is already completed.")
 
-        # Check if the most recently generated question is still waiting for an answer
         unanswered = [q for q in session.questions if q.candidate_answer is None]
         if unanswered:
             current_num = unanswered[0].question_number
@@ -331,7 +261,6 @@ class SessionService:
                 "Submit an answer before requesting the next question."
             )
 
-        # Check if max configured questions have already been generated
         if len(session.questions) >= session.total_questions:
             raise SessionStateError(
                 f"Cannot generate more questions: maximum total of {session.total_questions} "
@@ -346,10 +275,7 @@ class SessionService:
         question_data: InterviewQuestionResponse,
         db: Optional[Session] = None,
     ) -> SessionNextQuestionResponse:
-        """
-        Append a generated question to the session and advance the question number.
-        Persists question to database when db is provided.
-        """
+        """Append a generated question to the session and advance the question number."""
         session = self.get_session(session_id, db=db)
         next_question_number = len(session.questions) + 1
 
@@ -369,35 +295,13 @@ class SessionService:
         session.updated_at = datetime.now(timezone.utc).isoformat()
 
         if db is not None:
-            session_db = db.get(InterviewSession, session_id)
-            question_db = InterviewQuestion(
-                id=str(uuid.uuid4()),
+            self._repository.add_question(
+                db,
                 session_id=session_id,
-                order=next_question_number,
-                question=question_data.question,
-                topic=question_data.topic,
-                difficulty=(
-                    question_data.difficulty.value
-                    if hasattr(question_data.difficulty, "value")
-                    else str(question_data.difficulty)
-                ),
-                question_type=(
-                    session.question_type.value
-                    if hasattr(session.question_type, "value")
-                    else str(session.question_type)
-                ),
-                expected_answer_points=question_data.expected_answer_points,
-                follow_up_question=question_data.follow_up_question,
-                candidate_answer=None,
-                session=session_db,
+                question_number=next_question_number,
+                question_type=enum_to_value(session.question_type),
+                question_data=question_data,
             )
-            db.add(question_db)
-
-            if session_db:
-                session_db.current_question_number = next_question_number
-            db.flush()
-            logger.info("Persisted question #%d to database for session %s.", next_question_number, session_id)
-
 
         logger.info("Added question #%d to session %s.", next_question_number, session_id)
 
@@ -418,16 +322,16 @@ class SessionService:
         question_number: Optional[int] = None,
         db: Optional[Session] = None,
     ) -> SessionQuestionItem:
-        """
-        Validate that a candidate answer can be submitted for the specified or current question.
-        """
+        """Validate that a candidate answer can be submitted for the specified or current question."""
         session = self.get_session(session_id, db=db)
 
         if session.status == SessionStatus.COMPLETED:
             raise SessionStateError("Cannot submit answer: interview session is completed.")
 
         if not session.questions:
-            raise SessionStateError("No questions have been generated for this session yet. Request a question first.")
+            raise SessionStateError(
+                "No questions have been generated for this session yet. Request a question first."
+            )
 
         if question_number is not None:
             matching = [q for q in session.questions if q.question_number == question_number]
@@ -435,16 +339,18 @@ class SessionService:
                 raise SessionStateError(f"Question #{question_number} does not exist in this session.")
             target = matching[0]
             if target.candidate_answer is not None:
-                raise SessionStateError(f"Question #{question_number} has already been answered. Duplicate submissions are not allowed.")
-            return target
-        else:
-            target = session.questions[-1]
-            if target.candidate_answer is not None:
                 raise SessionStateError(
-                    f"Current question #{target.question_number} has already been answered. "
-                    "Please request the next question."
+                    f"Question #{question_number} has already been answered. Duplicate submissions are not allowed."
                 )
             return target
+
+        target = session.questions[-1]
+        if target.candidate_answer is not None:
+            raise SessionStateError(
+                f"Current question #{target.question_number} has already been answered. "
+                "Please request the next question."
+            )
+        return target
 
     def record_answer_and_evaluation(
         self,
@@ -454,10 +360,7 @@ class SessionService:
         evaluation: InterviewEvaluationResponse,
         db: Optional[Session] = None,
     ) -> SessionSubmitAnswerResponse:
-        """
-        Record candidate answer and AI evaluation on the target question and update progress.
-        Persists evaluation to database when db is provided.
-        """
+        """Record candidate answer and AI evaluation on the target question and update progress."""
         session = self.get_session(session_id, db=db)
         matching = [q for q in session.questions if q.question_number == question_number]
         if not matching:
@@ -467,59 +370,18 @@ class SessionService:
         target.candidate_answer = candidate_answer
         target.evaluation = evaluation
 
-        # Update completed questions count
         session.completed_questions = sum(1 for q in session.questions if q.evaluation is not None)
         session.updated_at = datetime.now(timezone.utc).isoformat()
 
         if db is not None:
-            stmt = select(InterviewQuestion).where(
-                InterviewQuestion.session_id == session_id,
-                InterviewQuestion.order == question_number,
+            self._repository.record_answer_evaluation(
+                db,
+                session_id=session_id,
+                question_number=question_number,
+                candidate_answer=candidate_answer,
+                evaluation=evaluation,
+                completed_questions=session.completed_questions,
             )
-            question_db = db.execute(stmt).scalars().first()
-            if question_db:
-                question_db.candidate_answer = candidate_answer
-
-                rating_val = (
-                    evaluation.rating.value
-                    if hasattr(evaluation.rating, "value")
-                    else str(evaluation.rating)
-                )
-
-                if question_db.evaluation is not None:
-                    # Update existing evaluation to avoid duplicate records
-                    question_db.evaluation.candidate_answer = candidate_answer
-                    question_db.evaluation.score = evaluation.overall_score
-                    question_db.evaluation.rating = rating_val
-                    question_db.evaluation.correct_points = evaluation.correct_points
-                    question_db.evaluation.missing_points = evaluation.missing_points
-                    question_db.evaluation.strengths = evaluation.strengths
-                    question_db.evaluation.improvements = evaluation.improvements
-                    question_db.evaluation.sample_answer = evaluation.sample_answer
-                else:
-                    eval_db = AnswerEvaluation(
-                        id=str(uuid.uuid4()),
-                        question_id=question_db.id,
-                        session_id=session_id,
-                        candidate_answer=candidate_answer,
-                        score=evaluation.overall_score,
-                        rating=rating_val,
-                        correct_points=evaluation.correct_points,
-                        missing_points=evaluation.missing_points,
-                        strengths=evaluation.strengths,
-                        improvements=evaluation.improvements,
-                        sample_answer=evaluation.sample_answer,
-                        question=question_db,
-                    )
-                    db.add(eval_db)
-                    question_db.evaluation = eval_db
-
-            session_db = db.get(InterviewSession, session_id)
-
-            if session_db:
-                session_db.completed_questions = session.completed_questions
-            db.flush()
-            logger.info("Persisted answer evaluation to database for question #%d in session %s.", question_number, session_id)
 
         logger.info(
             "Recorded evaluation for question #%d in session %s. Score: %d (%s). Progress: %d/%d.",
@@ -545,21 +407,18 @@ class SessionService:
         session_id: str,
         db: Optional[Session] = None,
     ) -> InterviewSessionSummaryResponse:
-        """
-        Mark the session as completed and calculate the final performance summary.
-        Persists status update to database when db is provided.
-        """
+        """Mark the session as completed and calculate the final performance summary."""
         session = self.get_session(session_id, db=db)
 
         session.status = SessionStatus.COMPLETED
         session.updated_at = datetime.now(timezone.utc).isoformat()
 
         if db is not None:
-            session_db = db.get(InterviewSession, session_id)
-            if session_db:
-                session_db.status = SessionStatus.COMPLETED.value
-            db.flush()
-            logger.info("Persisted session completion status to database for session %s.", session_id)
+            self._repository.update_status(
+                db,
+                session_id=session_id,
+                status_value=SessionStatus.COMPLETED.value,
+            )
 
         evaluated_questions = [q for q in session.questions if q.evaluation is not None]
         questions_answered = len(evaluated_questions)
@@ -574,17 +433,12 @@ class SessionService:
             average_score = round(total_score / questions_answered, 2)
             overall_rating = EvaluationRating.from_score(round(average_score))
 
-            aggregated_strengths = []
-            for q in evaluated_questions:
-                for s in q.evaluation.strengths:
-                    if s not in aggregated_strengths:
-                        aggregated_strengths.append(s)
-
-            aggregated_improvement_areas = []
-            for q in evaluated_questions:
-                for imp in q.evaluation.improvements:
-                    if imp not in aggregated_improvement_areas:
-                        aggregated_improvement_areas.append(imp)
+            aggregated_strengths = list(
+                dict.fromkeys(s for q in evaluated_questions for s in q.evaluation.strengths)
+            )
+            aggregated_improvement_areas = list(
+                dict.fromkeys(imp for q in evaluated_questions for imp in q.evaluation.improvements)
+            )
 
         logger.info(
             "Completed session %s. Answered: %d/%d, Average score: %.2f (%s).",
@@ -613,7 +467,6 @@ class SessionService:
         self._sessions.clear()
 
 
-# Singleton instance of SessionService for the application runtime
 _session_service_instance = SessionService()
 
 

@@ -5,12 +5,9 @@ technically grounded interview questions using Ollama (qwen2.5:1.5b), defending 
 prompt injection and strictly avoiding hallucinations or invented candidate history.
 """
 
-import json
 import logging
-import re
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from fastapi import Depends
-from pydantic import ValidationError
 
 from app.schemas.document import (
     SourceProcessingStatus,
@@ -44,6 +41,7 @@ from app.services.source_service import (
     SourceService,
     get_source_service,
 )
+from app.utils.json_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +89,10 @@ RAG_SYSTEM_PROMPT = (
 # ============================================================================
 
 
+# Shared in-memory question cache across service instances
+_global_cached_questions: Dict[str, SourceQuestionsResponse] = {}
+
+
 class RAGQuestionService:
     """Coordinates semantic chunk retrieval and document-grounded question generation.
 
@@ -108,6 +110,21 @@ class RAGQuestionService:
         self.retrieval_service = retrieval_service or get_retrieval_service()
         self.ollama_service = ollama_service or get_ollama_service()
         self.source_service = source_service or get_source_service()
+
+    @property
+    def _cached_questions(self) -> Dict[str, SourceQuestionsResponse]:
+        return _global_cached_questions
+
+    def reset_store(self) -> None:
+        """Clear the cached generated questions for test isolation."""
+        _global_cached_questions.clear()
+
+    def clear_cache(self, source_id: Optional[str] = None) -> None:
+        """Clear cached questions for a specific source ID or all sources."""
+        if source_id:
+            _global_cached_questions.pop(source_id, None)
+        else:
+            _global_cached_questions.clear()
 
     @staticmethod
     def _construct_search_query(
@@ -131,13 +148,26 @@ class RAGQuestionService:
             return "No matching document excerpts were found for this query."
 
         formatted_pieces = []
-        for idx, chunk in enumerate(chunks, start=1):
+        for chunk in chunks:
             excerpt = chunk.text.strip()
             formatted_pieces.append(
                 f"--- Candidate Document Excerpt #{chunk.chunk_index} (Relevance Score: {chunk.score:.2f}) ---\n"
                 f"{excerpt}"
             )
         return "\n\n".join(formatted_pieces)
+
+    @staticmethod
+    def _build_citations(chunks: List[RetrievedChunk]) -> List[RetrievedChunkMetadata]:
+        """Build API-safe citation metadata objects from retrieved chunks."""
+        return [
+            RetrievedChunkMetadata(
+                chunk_id=c.chunk_id,
+                chunk_index=c.chunk_index,
+                similarity_score=round(c.score, 4),
+                excerpt=c.safe_excerpt,
+            )
+            for c in chunks
+        ]
 
     async def generate_document_question(
         self,
@@ -211,20 +241,16 @@ class RAGQuestionService:
         )
 
         # 5. Clean potential markdown wraps and parse JSON safely
-        clean_output = raw_output.strip()
-        if clean_output.startswith("```"):
-            clean_output = re.sub(r"^```(?:json)?\s*", "", clean_output)
-            clean_output = re.sub(r"\s*```$", "", clean_output)
-            clean_output = clean_output.strip()
-
         try:
-            parsed_data = json.loads(clean_output)
-        except json.JSONDecodeError as exc:
+            parsed_data = parse_llm_json(
+                raw_output,
+                error_cls=OllamaResponseError,
+                decode_error_message="Failed to parse JSON response from the local AI model.",
+                type_error_message="The AI model returned an unexpected JSON structure.",
+            )
+        except OllamaResponseError:
             logger.error("Failed to decode JSON from Ollama RAG question output: %s", raw_output)
-            raise OllamaResponseError("Failed to parse JSON response from the local AI model.") from exc
-
-        if not isinstance(parsed_data, dict):
-            raise OllamaResponseError("The AI model returned an unexpected JSON structure.")
+            raise
 
         # Fallbacks for difficulty and topic if omitted by model
         if not parsed_data.get("difficulty"):
@@ -232,16 +258,7 @@ class RAGQuestionService:
         if not parsed_data.get("topic"):
             parsed_data["topic"] = target_topic
 
-        # Build citations metadata
-        citations = [
-            RetrievedChunkMetadata(
-                chunk_id=c.chunk_id,
-                chunk_index=c.chunk_index,
-                similarity_score=round(c.score, 4),
-                excerpt=c.safe_excerpt,
-            )
-            for c in retrieved_chunks
-        ]
+        citations = self._build_citations(retrieved_chunks)
 
         # 6. Validate and construct DocumentQuestionResponse
         return DocumentQuestionResponse(
@@ -284,9 +301,15 @@ class RAGQuestionService:
                 f"Source '{source_id}' failed processing: {source.error_message or 'Unknown error'}."
             )
 
-        target_role = request.role or "Software Engineer"
-        target_topic = request.topic or "Technical Background & Architecture"
-        count = max(1, min(10, request.count))
+        target_role = request.role or "General Technical Interview"
+        target_topic = request.topic or getattr(source, "title", "Technical Background & Architecture")
+        count = max(1, min(20, request.count or 5))
+
+        # Check question cache to prevent duplicate LLM calls
+        if not getattr(request, "force_regenerate", False) and source_id in self._cached_questions:
+            cached = self._cached_questions[source_id]
+            logger.info("Returning cached grounded questions for source '%s' (%d questions).", source_id, cached.total_questions)
+            return cached
 
         # 2. Retrieve relevant chunks from Pinecone filtered by source_id
         search_query = self._construct_search_query(
@@ -295,7 +318,7 @@ class RAGQuestionService:
             question_type=request.question_type,
         )
 
-        top_k = max(4, min(10, count * 2))
+        top_k = max(4, min(15, count * 2))
         retrieved_chunks = await self.retrieval_service.retrieve_chunks(
             query_text=search_query,
             document_id=source_id,
@@ -357,17 +380,16 @@ class RAGQuestionService:
             format="json",
         )
 
-        clean_output = raw_output.strip()
-        if clean_output.startswith("```"):
-            clean_output = re.sub(r"^```(?:json)?\s*", "", clean_output)
-            clean_output = re.sub(r"\s*```$", "", clean_output)
-            clean_output = clean_output.strip()
-
         try:
-            parsed = json.loads(clean_output)
-        except json.JSONDecodeError as exc:
+            parsed = parse_llm_json(
+                raw_output,
+                error_cls=OllamaResponseError,
+                decode_error_message="AI model returned malformed JSON response.",
+                expect_dict=False,
+            )
+        except OllamaResponseError:
             logger.error("Failed to decode JSON from Ollama in source questions: %s", raw_output)
-            raise OllamaResponseError("AI model returned malformed JSON response.") from exc
+            raise
 
         raw_list = []
         if isinstance(parsed, dict):
@@ -414,23 +436,17 @@ class RAGQuestionService:
         if not questions:
             raise OllamaResponseError("Failed to extract any valid structured questions from model output.")
 
-        citations = [
-            RetrievedChunkMetadata(
-                chunk_id=c.chunk_id,
-                chunk_index=c.chunk_index,
-                similarity_score=round(c.score, 4),
-                excerpt=c.safe_excerpt,
-            )
-            for c in retrieved_chunks
-        ]
+        citations = self._build_citations(retrieved_chunks)
 
-        return SourceQuestionsResponse(
+        result = SourceQuestionsResponse(
             source_id=source_id,
             context_grounded=True,
             total_questions=len(questions),
             questions=questions,
             retrieved_chunks=citations,
         )
+        self._cached_questions[source_id] = result
+        return result
 
 
 def get_rag_question_service(

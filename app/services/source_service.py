@@ -3,32 +3,31 @@
 from datetime import datetime, timezone
 import logging
 from typing import Dict, List, Optional
-from sqlalchemy import select
+
 from sqlalchemy.orm import Session
 
 from app.models.interview import DocumentSource
+from app.repositories.source_repository import SourceRepository
 from app.schemas.document import SourceProcessingStatus, SourceStatusResponse, SourceType
+from app.utils.identifiers import enum_to_value
 
 logger = logging.getLogger(__name__)
 
 
 class SourceServiceError(Exception):
     """Base exception for source service errors."""
-    pass
 
 
 class SourceNotFoundError(SourceServiceError):
     """Raised when a requested source ID is not found."""
-    pass
 
 
 class SourceNotReadyError(SourceServiceError):
     """Raised when an operation requires a completed source, but processing is pending or failed."""
-    pass
 
 
 def _db_to_source_status(src_db: DocumentSource) -> SourceStatusResponse:
-    """Helper to convert a DocumentSource database model into a SourceStatusResponse schema."""
+    """Convert a DocumentSource database model into a SourceStatusResponse schema."""
     created_str = (
         src_db.created_at.isoformat()
         if src_db.created_at
@@ -52,8 +51,9 @@ def _db_to_source_status(src_db: DocumentSource) -> SourceStatusResponse:
 class SourceService:
     """Service managing metadata, indexing state, and persistence for documents and URLs."""
 
-    def __init__(self) -> None:
+    def __init__(self, repository: Optional[SourceRepository] = None) -> None:
         self._sources: Dict[str, SourceStatusResponse] = {}
+        self._repository = repository or SourceRepository()
 
     def reset_store(self) -> None:
         """Clear the in-memory cache for test isolation."""
@@ -92,24 +92,19 @@ class SourceService:
         self._sources[source_id] = source_resp
 
         if db is not None:
-            try:
-                db_source = DocumentSource(
-                    id=source_id,
-                    source_type=source_type.value if hasattr(source_type, "value") else str(source_type),
-                    title=title[:255],
-                    url=url,
-                    filename=filename[:255] if filename else None,
-                    status=status.value if hasattr(status, "value") else str(status),
-                    character_count=character_count,
-                    chunk_count=chunk_count,
-                    vector_count=vector_count,
-                    error_message=error_message,
-                )
-                db.add(db_source)
-                db.flush()
-                logger.info("Persisted source record '%s' to database.", source_id)
-            except Exception as exc:
-                logger.warning("Failed to persist source '%s' to database: %s", source_id, exc)
+            self._repository.create(
+                db,
+                source_id=source_id,
+                source_type=enum_to_value(source_type),
+                title=title,
+                url=url,
+                filename=filename,
+                status=enum_to_value(status),
+                character_count=character_count,
+                chunk_count=chunk_count,
+                vector_count=vector_count,
+                error_message=error_message,
+            )
 
         return source_resp
 
@@ -142,22 +137,15 @@ class SourceService:
         self._sources[source_id] = new_source
 
         if db is not None:
-            try:
-                src_db = db.get(DocumentSource, source_id)
-                if src_db:
-                    if status is not None:
-                        src_db.status = status.value if hasattr(status, "value") else str(status)
-                    if character_count is not None:
-                        src_db.character_count = character_count
-                    if chunk_count is not None:
-                        src_db.chunk_count = chunk_count
-                    if vector_count is not None:
-                        src_db.vector_count = vector_count
-                    if error_message is not None:
-                        src_db.error_message = error_message
-                    db.flush()
-            except Exception as exc:
-                logger.warning("Failed to update database source '%s': %s", source_id, exc)
+            self._repository.update(
+                db,
+                source_id=source_id,
+                status=enum_to_value(status) if status is not None else None,
+                character_count=character_count,
+                chunk_count=chunk_count,
+                vector_count=vector_count,
+                error_message=error_message,
+            )
 
         return new_source
 
@@ -172,14 +160,11 @@ class SourceService:
             raise SourceNotFoundError("source_id must not be empty.")
 
         if db is not None:
-            try:
-                src_db = db.get(DocumentSource, clean_id)
-                if src_db is not None:
-                    resp = _db_to_source_status(src_db)
-                    self._sources[clean_id] = resp
-                    return resp
-            except Exception as exc:
-                logger.debug("Database lookup for source '%s' failed: %s", clean_id, exc)
+            src_db = self._repository.get_by_id(db, clean_id)
+            if src_db is not None:
+                resp = _db_to_source_status(src_db)
+                self._sources[clean_id] = resp
+                return resp
 
         if clean_id in self._sources:
             return self._sources[clean_id]
@@ -194,17 +179,9 @@ class SourceService:
     ) -> List[SourceStatusResponse]:
         """List registered sources ordered by most recent."""
         if db is not None:
-            try:
-                stmt = (
-                    select(DocumentSource)
-                    .order_by(DocumentSource.created_at.desc())
-                    .offset(skip)
-                    .limit(limit)
-                )
-                db_sources = list(db.execute(stmt).scalars().all())
+            db_sources = self._repository.list_recent(db, limit=limit, skip=skip)
+            if db_sources is not None:
                 return [_db_to_source_status(s) for s in db_sources]
-            except Exception as exc:
-                logger.warning("Failed to list sources from database: %s", exc)
 
         all_sources = list(self._sources.values())
         return all_sources[skip : skip + limit]
@@ -216,4 +193,3 @@ _global_source_service = SourceService()
 def get_source_service() -> SourceService:
     """FastAPI dependency yielding singleton SourceService."""
     return _global_source_service
-

@@ -3,6 +3,7 @@ import os
 from typing import Generator, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from fastapi import Request
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -178,21 +179,48 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def get_db_optional() -> Generator[Optional[Session], None, None]:
+def get_db_optional(request: Request = None) -> Generator[Optional[Session], None, None]:  # type: ignore[assignment]
     """
     FastAPI dependency yielding a managed session if DATABASE_URL is configured,
     or None if running without database configuration (e.g., local memory-only dev mode).
     Also supports FastAPI app.dependency_overrides[get_db].
     """
-    from app.main import app  # Deferred import to support test overrides
-
-    if get_db in app.dependency_overrides:
-        override = app.dependency_overrides[get_db]
-        yield from override()
-        return
+    if request is not None:
+        overrides = getattr(request.app, "dependency_overrides", {})
+        if get_db in overrides:
+            yield from overrides[get_db]()
+            return
 
     if not is_database_configured():
         yield None
         return
 
-    yield from get_db()
+    try:
+        session_factory = get_session_factory()
+        db = session_factory()
+    except Exception as exc:
+        logger.warning("Could not initialize database session: %s", exc)
+        yield None
+        return
+
+    try:
+        yield db
+        try:
+            db.commit()
+        except Exception as exc:
+            logger.warning("Database commit failed in get_db_optional: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass

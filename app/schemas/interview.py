@@ -9,12 +9,17 @@ class ExperienceLevel(str, Enum):
     FRESHER = "Fresher"
     JUNIOR = "Junior"
     MID_LEVEL = "Mid-Level"
+    INTERMEDIATE = "Intermediate"
     SENIOR = "Senior"
 
     @classmethod
     def _missing_(cls, value: object):
         if isinstance(value, str):
             val_clean = value.strip().lower()
+            if val_clean in ("intermediate",):
+                return cls.INTERMEDIATE
+            if val_clean in ("mid", "midlevel", "mid-level"):
+                return cls.MID_LEVEL
             for member in cls:
                 if member.value.lower() == val_clean:
                     return member

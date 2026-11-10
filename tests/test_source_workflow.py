@@ -715,3 +715,580 @@ def test_source_questions_ollama_malformed_json_returns_502():
         assert response.status_code == 502
     finally:
         app.dependency_overrides.pop(get_ollama_service, None)
+
+
+# ============================================================================
+# 7. Automatic Question Generation, Defaults & Deduplication Tests
+# ============================================================================
+
+
+def test_source_questions_automatic_sensible_defaults():
+    """Test that question generation uses sensible defaults without manual configuration:
+    Role: General Technical Interview, Experience: Intermediate, Difficulty: Medium, Count: 5."""
+    source_service = get_source_service()
+    source_id = "src_auto_defaults_001"
+    source_service.register_source(
+        source_id=source_id,
+        source_type=SourceType.DOCUMENT,
+        title="Resume.pdf",
+        status=SourceProcessingStatus.COMPLETED,
+    )
+
+    recorded_calls = []
+
+    class MockOllama(OllamaService):
+        async def generate_chat_completion(self, messages, format=None):
+            recorded_calls.append(messages)
+            return json.dumps({
+                "questions": [
+                    {
+                        "id": f"q_{i}",
+                        "question": f"Question {i} about architecture",
+                        "expected_answer_points": ["Point 1", "Point 2"],
+                        "follow_up_question": "Follow-up",
+                        "difficulty": "Medium",
+                        "topic": "Architecture",
+                    }
+                    for i in range(1, 6)
+                ]
+            })
+
+    from app.services.retrieval_service import RetrievedChunk, get_retrieval_service
+    from app.services.rag_question_service import get_rag_question_service
+
+    rag_service = get_rag_question_service()
+    rag_service.reset_store()
+
+    class MockRetrieval:
+        async def retrieve_chunks(self, *args, **kwargs):
+            return [
+                RetrievedChunk(
+                    chunk_id="c1",
+                    chunk_index=0,
+                    score=0.92,
+                    text="Experienced with distributed systems, microservices, and PostgreSQL.",
+                    document_id=source_id,
+                )
+            ]
+
+    app.dependency_overrides[get_ollama_service] = lambda: MockOllama()
+    app.dependency_overrides[get_retrieval_service] = lambda: MockRetrieval()
+
+    try:
+        # Call without payload body (automatic generation)
+        response = client.post(f"/api/v1/sources/{source_id}/questions")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_id"] == source_id
+        assert data["context_grounded"] is True
+        assert len(data["questions"]) == 5
+        assert data["total_questions"] == 5
+
+        # Check default prompt parameters were used
+        assert len(recorded_calls) == 1
+        prompt_text = recorded_calls[0][1]["content"]
+        assert "General Technical Interview" in prompt_text
+        assert "Intermediate" in prompt_text or "Mid-Level" in prompt_text
+        assert "Medium" in prompt_text
+        assert "Question Count Required: 5" in prompt_text
+    finally:
+        app.dependency_overrides.pop(get_ollama_service, None)
+        app.dependency_overrides.pop(get_retrieval_service, None)
+
+
+def test_source_questions_cache_prevents_duplicate_generation():
+    """Test that calling question generation twice for the same source ID returns cached
+    questions and avoids duplicate LLM generation."""
+    source_service = get_source_service()
+    source_id = "src_cache_dedup_002"
+    source_service.register_source(
+        source_id=source_id,
+        source_type=SourceType.DOCUMENT,
+        title="TechSpec.pdf",
+        status=SourceProcessingStatus.COMPLETED,
+    )
+
+    llm_call_count = 0
+
+    class CountingOllama(OllamaService):
+        async def generate_chat_completion(self, messages, format=None):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            return json.dumps({
+                "questions": [
+                    {
+                        "id": "q_1",
+                        "question": "Explain consistency models in distributed databases.",
+                        "expected_answer_points": ["Linearizability", "Eventual consistency"],
+                        "difficulty": "Medium",
+                        "topic": "Distributed Systems",
+                    }
+                ]
+            })
+
+    from app.services.retrieval_service import RetrievedChunk, get_retrieval_service
+    from app.services.rag_question_service import get_rag_question_service
+
+    rag_service = get_rag_question_service()
+    rag_service.reset_store()
+
+    class MockRetrieval:
+        async def retrieve_chunks(self, *args, **kwargs):
+            return [
+                RetrievedChunk(
+                    chunk_id="c_dedup",
+                    chunk_index=0,
+                    score=0.88,
+                    text="Experience designing distributed data storage engines.",
+                    document_id=source_id,
+                )
+            ]
+
+    app.dependency_overrides[get_ollama_service] = lambda: CountingOllama()
+    app.dependency_overrides[get_retrieval_service] = lambda: MockRetrieval()
+
+    try:
+        # First call: triggers LLM generation
+        resp1 = client.post(f"/api/v1/sources/{source_id}/questions")
+        assert resp1.status_code == 200
+        assert llm_call_count == 1
+        q_data1 = resp1.json()
+
+        # Second call (e.g. page reload or duplicate frontend call): returns cached response
+        resp2 = client.post(f"/api/v1/sources/{source_id}/questions")
+        assert resp2.status_code == 200
+        assert llm_call_count == 1  # Did NOT call LLM again!
+        q_data2 = resp2.json()
+        assert q_data2["questions"][0]["id"] == q_data1["questions"][0]["id"]
+
+        # Call with force_regenerate=True: bypasses cache and regenerates
+        resp3 = client.post(f"/api/v1/sources/{source_id}/questions", json={"force_regenerate": True})
+        assert resp3.status_code == 200
+        assert llm_call_count == 2
+    finally:
+        app.dependency_overrides.pop(get_ollama_service, None)
+        app.dependency_overrides.pop(get_retrieval_service, None)
+
+
+def test_e2e_pdf_rag_automatic_workflow():
+    """Full End-to-End PDF Workflow Test:
+    Upload PDF -> RAG processing -> Automatic questions -> Start Interview -> Answer -> Evaluation."""
+    from app.services.retrieval_service import RetrievedChunk, get_retrieval_service
+    from app.services.rag_question_service import get_rag_question_service
+    from app.services.session_service import get_session_service
+
+    get_rag_question_service().reset_store()
+    get_session_service().reset_store()
+
+    captured_chunks = []
+
+    class MockEmbedding:
+        async def embed_chunks(self, chunks):
+            captured_chunks.extend(chunks)
+            return [[0.1] * 768 for _ in chunks]
+
+        async def embed_text(self, text):
+            return [0.1] * 768
+
+    class MockPinecone:
+        async def upsert_document_chunks(self, document_id, chunks, vectors, filename):
+            return len(chunks)
+
+        async def query_similar_chunks(self, query_vector, document_id, top_k, namespace=None):
+            return [
+                {
+                    "id": f"{document_id}_chunk_0",
+                    "chunk_index": 0,
+                    "score": 0.95,
+                    "metadata": {
+                        "text": "Experienced Python and FastAPI backend architect with Redis caching experience.",
+                        "filename": "candidate_resume.pdf",
+                    },
+                }
+            ]
+
+    eval_count = 0
+
+    class MockOllama(OllamaService):
+        async def generate_chat_completion(self, messages, format=None):
+            nonlocal eval_count
+            system_msg = messages[0]["content"] if messages else ""
+            if "Generate exactly 5 distinct" in system_msg or "structured technical interview" in system_msg:
+                # Question generation
+                return json.dumps({
+                    "questions": [
+                        {
+                            "id": f"q_{i}",
+                            "question": f"How do you implement Redis caching in FastAPI service #{i}?",
+                            "expected_answer_points": [
+                                "Use redis-py async client",
+                                "Implement cache-aside pattern",
+                                "Set proper TTL",
+                            ],
+                            "follow_up_question": "How do you handle cache invalidation?",
+                            "difficulty": "Medium",
+                            "topic": "FastAPI & Redis",
+                        }
+                        for i in range(1, 6)
+                    ]
+                })
+            else:
+                # Answer evaluation
+                eval_count += 1
+                return json.dumps({
+                    "overall_score": 92,
+                    "rating": "Excellent",
+                    "correct_points": ["Used redis-py async client with connection pooling", "Set explicit TTL"],
+                    "missing_points": ["Could mention dogpiling / thundering herd protection"],
+                    "strengths": ["Clear explanation of cache-aside strategy"],
+                    "improvements": ["Add mutex locking for thundering herd mitigation"],
+                    "sample_answer": "In FastAPI, use aioredis with a dependency-injected connection pool, wrapping database queries in a cache-aside get-or-set with TTL.",
+                })
+
+    app.dependency_overrides[get_embedding_service] = lambda: MockEmbedding()
+    app.dependency_overrides[get_pinecone_service] = lambda: MockPinecone()
+    app.dependency_overrides[get_ollama_service] = lambda: MockOllama()
+
+    try:
+        # 1. Upload PDF
+        pdf_bytes = create_sample_pdf("Experienced Python and FastAPI backend architect with Redis caching experience.")
+        upload_resp = client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("candidate_resume.pdf", pdf_bytes, "application/pdf")},
+        )
+        assert upload_resp.status_code == 200
+        upload_data = upload_resp.json()
+        assert upload_data["success"] is True
+        source_id = upload_data["source_id"]
+        assert source_id.startswith("doc_")
+
+        # 2. Automatically generate questions (frontend calls with sensible defaults)
+        q_resp = client.post(
+            f"/api/v1/sources/{source_id}/questions",
+            json={
+                "source_id": source_id,
+                "role": "General Technical Interview",
+                "experience_level": "Intermediate",
+                "difficulty": "Medium",
+                "count": 5,
+                "question_type": "Technical",
+            },
+        )
+        assert q_resp.status_code == 200
+        q_data = q_resp.json()
+        assert q_data["context_grounded"] is True
+        assert len(q_data["questions"]) == 5
+        generated_questions = q_data["questions"]
+
+        # 3. Start Interview session
+        sess_resp = client.post(
+            "/api/v1/sources/sessions",
+            json={
+                "role": "General Technical Interview",
+                "experience_level": "Intermediate",
+                "difficulty": "Medium",
+                "topic": "FastAPI & Redis",
+                "question_type": "Technical",
+                "total_questions": len(generated_questions),
+                "source_id": source_id,
+                "questions": [
+                    {
+                        "id": q["id"],
+                        "question": q["question"],
+                        "expected_answer_points": q["expected_answer_points"],
+                        "follow_up_question": q.get("follow_up_question"),
+                        "difficulty": q["difficulty"],
+                        "topic": q["topic"],
+                    }
+                    for q in generated_questions
+                ],
+            },
+        )
+        assert sess_resp.status_code == 201
+        sess_data = sess_resp.json()
+        session_id = sess_data["session_id"]
+        assert sess_data["source_id"] == source_id
+        assert sess_data["status"] == "in_progress"
+        assert len(sess_data["questions"]) == 5
+
+        # 4. Answer question 1
+        ans_resp = client.post(
+            f"/api/v1/interview/sessions/{session_id}/answers",
+            json={
+                "candidate_answer": "I configure an async Redis connection pool in FastAPI lifespan, check the cache before hitting Postgres, and set a 300 second TTL on cached JSON.",
+                "question_number": 1,
+            },
+        )
+        assert ans_resp.status_code == 200
+        ans_data = ans_resp.json()
+        assert ans_data["completed_questions"] == 1
+        assert ans_data["evaluation"]["overall_score"] == 92
+        assert ans_data["evaluation"]["rating"] == "Excellent"
+
+        # 5. Complete session
+        comp_resp = client.post(f"/api/v1/interview/sessions/{session_id}/complete")
+        assert comp_resp.status_code == 200
+        summary = comp_resp.json()
+        assert summary["session_status"] == "completed"
+        assert summary["average_score"] == 92.0
+    finally:
+        app.dependency_overrides.pop(get_embedding_service, None)
+        app.dependency_overrides.pop(get_pinecone_service, None)
+        app.dependency_overrides.pop(get_ollama_service, None)
+
+
+def test_e2e_github_mcp_automatic_workflow():
+    """Full End-to-End GitHub Workflow Test:
+    Enter GitHub repository URL -> MCP retrieval -> Automatic questions -> Start Interview -> Answer -> Evaluation."""
+    from app.services.retrieval_service import RetrievedChunk, get_retrieval_service
+    from app.services.rag_question_service import get_rag_question_service
+    from app.services.session_service import get_session_service
+    from app.schemas.github import RepoFileItem, RepoFilesListResponse, RepoFileContentResponse
+
+    get_rag_question_service().reset_store()
+    get_session_service().reset_store()
+
+    class MockEmbedding:
+        async def embed_chunks(self, chunks):
+            return [[0.2] * 768 for _ in chunks]
+
+        async def embed_text(self, text):
+            return [0.2] * 768
+
+    class MockPinecone:
+        async def upsert_document_chunks(self, document_id, chunks, vectors, filename):
+            return len(chunks)
+
+        async def query_similar_chunks(self, query_vector, document_id, top_k, namespace=None):
+            return [
+                {
+                    "id": f"{document_id}_chunk_0",
+                    "chunk_index": 0,
+                    "score": 0.94,
+                    "metadata": {
+                        "text": "FastAPI framework, high performance, easy to learn, fast to code, ready for production.",
+                        "filename": "fastapi/fastapi Repository",
+                    },
+                }
+            ]
+
+    class MockGitHubService:
+        async def get_readme(self, owner_or_url, **kwargs):
+            return RepoReadmeResponse(
+                owner="fastapi",
+                repo="fastapi",
+                filename="README.md",
+                content="# FastAPI Framework\nFastAPI is a modern, fast web framework for building APIs with Python 3.8+ based on standard Python type hints.\nKey features: Fast, fast to code, fewer bugs, intuitive, easy, robust, standards-based.",
+                size_bytes=250,
+                html_url="https://github.com/fastapi/fastapi/blob/main/README.md",
+            )
+
+        async def list_files(self, owner_or_url, path="", **kwargs):
+            return RepoFilesListResponse(
+                owner="fastapi",
+                repo="fastapi",
+                path=path,
+                items=[
+                    RepoFileItem(name="pyproject.toml", path="pyproject.toml", type="file", size=1500, html_url="https://github.com/fastapi/fastapi/blob/main/pyproject.toml"),
+                    RepoFileItem(name="main.py", path="main.py", type="file", size=800, html_url="https://github.com/fastapi/fastapi/blob/main/main.py"),
+                ],
+            )
+
+        async def get_file_content(self, owner_or_url, file_path, **kwargs):
+            return RepoFileContentResponse(
+                owner="fastapi",
+                repo="fastapi",
+                path=file_path,
+                filename=file_path.split("/")[-1],
+                size_bytes=500,
+                content="[project]\nname = 'fastapi'\nversion = '0.100.0'\ndependencies = ['pydantic', 'starlette']",
+                html_url=f"https://github.com/fastapi/fastapi/blob/main/{file_path}",
+            )
+
+    class MockOllama(OllamaService):
+        async def generate_chat_completion(self, messages, format=None):
+            system_msg = messages[0]["content"] if messages else ""
+            if "Generate exactly 5 distinct" in system_msg or "structured technical interview" in system_msg:
+                # Question generation
+                return json.dumps({
+                    "questions": [
+                        {
+                            "id": f"q_{i}",
+                            "question": f"How does FastAPI utilize Starlette and Pydantic internally according to the repository architecture (Question #{i})?",
+                            "expected_answer_points": [
+                                "Starlette provides the ASGI core, routing, and middleware",
+                                "Pydantic provides data validation and serialization",
+                                "Dependency injection integrates both seamlessly",
+                            ],
+                            "follow_up_question": "How are validation exceptions transformed into HTTP 422 responses?",
+                            "difficulty": "Medium",
+                            "topic": "FastAPI Architecture",
+                        }
+                        for i in range(1, 6)
+                    ]
+                })
+            else:
+                # Answer evaluation
+                return json.dumps({
+                    "overall_score": 95,
+                    "rating": "Excellent",
+                    "correct_points": ["Starlette manages ASGI request/response loop", "Pydantic handles schema validation"],
+                    "missing_points": [],
+                    "strengths": ["Deep understanding of FastAPI's underlying ASGI ecosystem"],
+                    "improvements": [],
+                    "sample_answer": "FastAPI is built directly on Starlette for ASGI networking and routing, while utilizing Pydantic models for request body parsing and OpenAPI schema generation.",
+                })
+
+    app.dependency_overrides[get_embedding_service] = lambda: MockEmbedding()
+    app.dependency_overrides[get_pinecone_service] = lambda: MockPinecone()
+    app.dependency_overrides[get_github_service] = lambda: MockGitHubService()
+    app.dependency_overrides[get_ollama_service] = lambda: MockOllama()
+
+    try:
+        # 1. Ingest GitHub repository URL
+        with patch.object(URLService, "validate_ssrf_url", return_value="https://github.com/fastapi/fastapi"):
+            ingest_resp = client.post("/api/v1/sources/url", json={"url": "https://github.com/fastapi/fastapi"})
+
+        assert ingest_resp.status_code == 200
+        ingest_data = ingest_resp.json()
+        assert ingest_data["source_type"] == "github"
+        source_id = ingest_data["source_id"]
+
+        # 2. Automatically generate questions (frontend calls immediately after ingestion)
+        q_resp = client.post(
+            f"/api/v1/sources/{source_id}/questions",
+            json={
+                "source_id": source_id,
+                "role": "General Technical Interview",
+                "experience_level": "Intermediate",
+                "difficulty": "Medium",
+                "count": 5,
+                "question_type": "Technical",
+            },
+        )
+        assert q_resp.status_code == 200
+        q_data = q_resp.json()
+        assert q_data["context_grounded"] is True
+        assert len(q_data["questions"]) == 5
+        generated_questions = q_data["questions"]
+
+        # 3. Start Interview session
+        sess_resp = client.post(
+            "/api/v1/sources/sessions",
+            json={
+                "role": "General Technical Interview",
+                "experience_level": "Intermediate",
+                "difficulty": "Medium",
+                "topic": "FastAPI Architecture",
+                "question_type": "Technical",
+                "total_questions": 5,
+                "source_id": source_id,
+                "questions": [
+                    {
+                        "id": q["id"],
+                        "question": q["question"],
+                        "expected_answer_points": q["expected_answer_points"],
+                        "follow_up_question": q.get("follow_up_question"),
+                        "difficulty": q["difficulty"],
+                        "topic": q["topic"],
+                    }
+                    for q in generated_questions
+                ],
+            },
+        )
+        assert sess_resp.status_code == 201
+        session_id = sess_resp.json()["session_id"]
+
+        # 4. Submit Answer
+        ans_resp = client.post(
+            f"/api/v1/interview/sessions/{session_id}/answers",
+            json={
+                "candidate_answer": "FastAPI uses Starlette for the ASGI request handling and routing, and Pydantic for validation and serialization.",
+                "question_number": 1,
+            },
+        )
+        assert ans_resp.status_code == 200
+        ans_data = ans_resp.json()
+        assert ans_data["completed_questions"] == 1
+        assert ans_data["evaluation"]["overall_score"] == 95
+
+        # 5. Complete session
+        comp_resp = client.post(f"/api/v1/interview/sessions/{session_id}/complete")
+        assert comp_resp.status_code == 200
+        assert comp_resp.json()["session_status"] == "completed"
+    finally:
+        app.dependency_overrides.pop(get_embedding_service, None)
+        app.dependency_overrides.pop(get_pinecone_service, None)
+        app.dependency_overrides.pop(get_github_service, None)
+        app.dependency_overrides.pop(get_ollama_service, None)
+
+
+def test_source_questions_allowed_counts_5_10_15_20():
+    """Verify that question counts 5, 10, 15, and 20 are accepted by SourceQuestionsRequest schema and API."""
+    source_service = get_source_service()
+    source_id = "src_count_test_001"
+    source_service.register_source(
+        source_id=source_id,
+        source_type=SourceType.DOCUMENT,
+        title="MicroservicesArchitecture.pdf",
+        status=SourceProcessingStatus.COMPLETED,
+    )
+
+    class CountingOllama(OllamaService):
+        def __init__(self, requested_count):
+            self.requested_count = requested_count
+
+        async def generate_chat_completion(self, messages, format=None):
+            return json.dumps({
+                "questions": [
+                    {
+                        "id": f"q_{i}",
+                        "question": f"Question {i} about microservices patterns",
+                        "expected_answer_points": ["Circuit breaker", "Service mesh"],
+                        "difficulty": "Medium",
+                        "topic": "Microservices",
+                    }
+                    for i in range(1, self.requested_count + 1)
+                ]
+            })
+
+    from app.services.retrieval_service import RetrievedChunk, get_retrieval_service
+    from app.services.rag_question_service import get_rag_question_service
+
+    rag_service = get_rag_question_service()
+
+    class MockRetrieval:
+        async def retrieve_chunks(self, *args, **kwargs):
+            return [
+                RetrievedChunk(
+                    chunk_id="c_count",
+                    chunk_index=0,
+                    score=0.91,
+                    text="Microservices design with gRPC and Kafka.",
+                    document_id=source_id,
+                )
+            ]
+
+    app.dependency_overrides[get_retrieval_service] = lambda: MockRetrieval()
+
+    for count in [5, 10, 15, 20]:
+        rag_service.reset_store()
+        app.dependency_overrides[get_ollama_service] = lambda c=count: CountingOllama(c)
+
+        resp = client.post(
+            f"/api/v1/sources/{source_id}/questions",
+            json={
+                "source_id": source_id,
+                "count": count,
+                "role": "General Technical Interview",
+                "force_regenerate": True,
+            },
+        )
+        assert resp.status_code == 200, f"Failed for count {count}: {resp.text}"
+        data = resp.json()
+        assert data["total_questions"] == count
+        assert len(data["questions"]) == count
+
+    app.dependency_overrides.pop(get_retrieval_service, None)
+    app.dependency_overrides.pop(get_ollama_service, None)
+

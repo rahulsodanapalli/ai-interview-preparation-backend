@@ -1,9 +1,7 @@
 """URL Ingestion Service with SSRF protection, redirect revalidation, and GitHub MCP integration."""
 
-from html.parser import HTMLParser
 import ipaddress
 import logging
-import re
 import socket
 from typing import Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -12,7 +10,6 @@ import uuid
 from fastapi import Depends
 import httpx
 
-from app.core.config import settings
 from app.schemas.document import (
     SourceProcessingStatus,
     SourceType,
@@ -23,6 +20,7 @@ from app.services.embedding_service import EmbeddingService, get_embedding_servi
 from app.services.github_mcp_service import GitHubMCPService, get_github_service
 from app.services.pinecone_service import PineconeService, get_pinecone_service
 from app.services.source_service import SourceService, get_source_service
+from app.utils.html_parser import HTMLTextExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -72,101 +70,7 @@ class EmptyContentError(URLServiceError):
     pass
 
 
-# ============================================================================
-# HTML Text & Title Parser
-# ============================================================================
-
-
-class HTMLTextExtractor(HTMLParser):
-    """Safe, zero-dependency HTML text and title parser using Python's standard library html.parser."""
-
-    SKIPPED_TAGS = {
-        "script",
-        "style",
-        "noscript",
-        "svg",
-        "nav",
-        "footer",
-        "header",
-        "aside",
-        "form",
-        "button",
-        "input",
-        "select",
-        "textarea",
-    }
-
-    BLOCK_TAGS = {
-        "p",
-        "div",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "li",
-        "ul",
-        "ol",
-        "tr",
-        "td",
-        "th",
-        "article",
-        "section",
-        "blockquote",
-        "pre",
-        "hr",
-        "br",
-    }
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.text_parts: list[str] = []
-        self.title_parts: list[str] = []
-        self._in_title = False
-        self._skip_depth = 0
-
-    def handle_starttag(self, tag: str, attrs) -> None:
-        tag_lower = tag.lower()
-        if tag_lower in self.SKIPPED_TAGS:
-            self._skip_depth += 1
-            return
-
-        if tag_lower == "title":
-            self._in_title = True
-        elif tag_lower in self.BLOCK_TAGS and self._skip_depth == 0:
-            self.text_parts.append("\n")
-
-    def handle_endtag(self, tag: str) -> None:
-        tag_lower = tag.lower()
-        if tag_lower in self.SKIPPED_TAGS:
-            if self._skip_depth > 0:
-                self._skip_depth -= 1
-            return
-
-        if tag_lower == "title":
-            self._in_title = False
-        elif tag_lower in self.BLOCK_TAGS and self._skip_depth == 0:
-            self.text_parts.append("\n")
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self.title_parts.append(data)
-        elif self._skip_depth == 0:
-            stripped = data.strip()
-            if stripped:
-                self.text_parts.append(f" {stripped} ")
-
-    def get_extracted_title(self) -> str:
-        raw = "".join(self.title_parts).strip()
-        return " ".join(raw.split()) if raw else "Webpage Documentation"
-
-    def get_extracted_text(self) -> str:
-        raw = "".join(self.text_parts)
-        # Collapse multiple newlines and spaces cleanly
-        lines = [line.strip() for line in raw.splitlines()]
-        cleaned = "\n".join(line for line in lines if line)
-        return cleaned
+# HTMLTextExtractor is imported from app.utils.html_parser and re-exported here for compatibility.
 
 
 # ============================================================================
@@ -399,6 +303,68 @@ class URLService:
 
         return current_url, title, readable_text
 
+    KEY_REPO_FILENAMES = {
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "cargo.toml",
+        "go.mod",
+        "dockerfile",
+        "docker-compose.yml",
+        "main.py",
+        "app.py",
+        "index.ts",
+        "index.js",
+        "src/main.py",
+        "src/index.ts",
+        "app/main.py",
+    }
+
+    async def _extract_github_repo_content(self, owner: str, repo: str) -> Tuple[str, str, str]:
+        """Fetch README and key root source files from a GitHub repository via GitHub MCP."""
+        repo_id = f"{owner}/{repo}"
+        title = f"{repo_id} Repository"
+        canonical_url = f"https://github.com/{owner}/{repo}"
+
+        logger.info("Ingesting GitHub repository '%s' via GitHub MCP Service.", repo_id)
+        readme_resp = await self.github_service.get_readme(owner_or_url=repo_id)
+        readable_text = readme_resp.content
+
+        if not readable_text or not readable_text.strip():
+            raise EmptyContentError(f"README for GitHub repository '{repo_id}' is empty.")
+
+        additional_context = []
+        try:
+            files_res = await self.github_service.list_files(owner_or_url=repo_id, path="")
+            for item in getattr(files_res, "items", []):
+                if (
+                    getattr(item, "type", "") == "file"
+                    and getattr(item, "name", "").lower() in self.KEY_REPO_FILENAMES
+                ):
+                    try:
+                        file_content_resp = await self.github_service.get_file_content(
+                            owner_or_url=repo_id,
+                            file_path=item.path,
+                        )
+                        if getattr(file_content_resp, "content", None):
+                            safe_file_text = file_content_resp.content[:3000]
+                            additional_context.append(
+                                f"\n\n--- Source File: {item.path} ---\n{safe_file_text}"
+                            )
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not fetch file '%s' for repository context: %s",
+                            getattr(item, "path", ""),
+                            exc,
+                        )
+        except Exception as exc:
+            logger.debug("Could not list repository files for '%s': %s", repo_id, exc)
+
+        if additional_context:
+            readable_text += "".join(additional_context)
+
+        return canonical_url, title, readable_text
+
     async def ingest_url(
         self,
         url: str,
@@ -413,21 +379,10 @@ class URLService:
 
         github_repo = self._parse_github_repo(clean_url)
         if github_repo is not None:
-            # Reuse GitHub MCP Service for GitHub repositories
             owner, repo = github_repo
-            repo_id = f"{owner}/{repo}"
             source_type = SourceType.GITHUB
-            title = f"{repo_id} Repository"
-
-            logger.info("Ingesting GitHub repository '%s' via GitHub MCP Service.", repo_id)
-            readme_resp = await self.github_service.get_readme(owner_or_url=repo_id)
-            readable_text = readme_resp.content
-
-            if not readable_text or not readable_text.strip():
-                raise EmptyContentError(f"README for GitHub repository '{repo_id}' is empty.")
-            canonical_url = f"https://github.com/{owner}/{repo}"
+            canonical_url, title, readable_text = await self._extract_github_repo_content(owner, repo)
         else:
-            # Regular publicly accessible webpage or documentation
             source_type = SourceType.URL
             canonical_url, title, readable_text = await self._fetch_webpage_content(clean_url)
 

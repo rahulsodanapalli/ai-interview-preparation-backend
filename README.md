@@ -1,553 +1,204 @@
-# AI Interview Preparation Platform - Backend (Day 6: Frontend API Integration Readiness)
+# AI Interview Preparation Platform — Backend
 
-A robust, enterprise-ready Python backend for an AI-powered technical interview preparation platform. Built with **FastAPI**, **SQLAlchemy**, **Alembic**, **PostgreSQL on Neon**, **HTTPX**, and a local **Ollama** runtime hosting **Qwen 2.5 (`qwen2.5:1.5b`)**.
+Enterprise FastAPI backend for the AI Interview Preparation Platform, powered by **FastAPI**, **SQLAlchemy 2.0**, **Alembic**, **PostgreSQL (Neon)**, **Pinecone**, **Ollama** (`qwen2.5:1.5b` & `nomic-embed-text`), and **GitHub MCP** (`mcp` stdio client).
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 ```mermaid
-graph LR
-    Frontend[React + Vite Frontend :5173] -->|HTTP / JSON (CORS Allowed)| FastAPI[FastAPI Backend :8000]
-    FastAPI -->|SQLAlchemy ORM / Psycopg 3| NeonDB[(Neon PostgreSQL Cloud)]
-    FastAPI -->|HTTPX Async Client| Ollama[Ollama Local Runtime :11434]
-    Ollama -->|Inference| Qwen[Qwen 2.5 Model 1.5B]
+flowchart LR
+    Client[React + Vite Frontend :5173] -->|HTTP / JSON| API[FastAPI API v1]
+    API --> Services[Domain Services Layer]
+    Services --> Repos[Repositories Layer]
+    Repos --> DB[(PostgreSQL / Neon)]
+    Services --> Integrations[External Integrations]
+    Integrations --> Ollama[Ollama LLM & Embeddings :11434]
+    Integrations --> Pinecone[(Pinecone Dense Vector Index)]
+    Integrations --> GitHubMCP[GitHub MCP Server stdio]
 ```
 
-### Key Highlights
-- **Frontend Integration Ready (Day 6)**: Configured CORS middleware supporting `http://localhost:5173` and `http://127.0.0.1:5173` for Vite/React development.
-- **Strict API Contracts & Error Handling**: Comprehensive Pydantic V2 request/response schemas, returning standard HTTP `422` on validation errors, `404` on missing records, and safe `500` error masks that never expose secrets or stack traces.
-- **Direct Local AI Inference**: Native communication with Ollama `/api/chat` and `/api/tags` using async HTTPX. No third-party AI framework overhead.
-- **Relational Persistence**: PostgreSQL on Neon storing session configurations, generated questions, and answer evaluations via SQLAlchemy 2.0 with Alembic version-controlled migrations.
-- **Dual Runtime Support**: Operates seamlessly in cloud-connected database mode (Neon) or offline fallback mode with in-memory caching.
-- **Automated Test Suite**: 93 automated tests (92 passing, 1 skipped live integration test) using `pytest`, isolated SQLite in-memory databases, and mocked AI inference.
+### Layered Responsibilities
+
+- **API Layer (`app/api/routes/`, `app/api/v1/router.py`)**: Thin HTTP adapters handling request parsing, Pydantic schema validation, dependency injection, and mapping domain exceptions to HTTP responses via `app/core/exceptions.py`.
+- **Core (`app/core/`)**: Centralized configuration (`config.py`), logging (`logging.py`), and shared HTTP exception translators (`exceptions.py`).
+- **Services (`app/services/`)**: Business workflows for interview question generation, answer evaluation, session lifecycles, PDF/URL ingestion, hybrid search (dense + BM25 + RRF), reranking, RAG Triad evaluation, and repository-grounded question generation.
+- **Repositories (`app/repositories/`)**: Encapsulates SQLAlchemy 2.0 queries and transaction/rollback boundaries for `InterviewSession`, `InterviewQuestion`, `AnswerEvaluation`, and `DocumentSource`.
+- **Integrations (`app/integrations/`)**: Protocol and client helpers isolated from core domain logic (Ollama model tag discovery and GitHub MCP read-only whitelist & payload decoders).
+- **Database & Models (`app/db/`, `app/models/`)**: Declarative SQLAlchemy models, URL normalization/credential masking, and dual-mode DB session management (`get_db` + `get_db_optional`).
+- **Schemas (`app/schemas/`)**: Pydantic v2 request/response contracts and field validators.
+- **Utilities (`app/utils/`)**: Shared markdown-fence stripping / JSON parsing (`json_parser.py`), HTML text extraction (`html_parser.py`), and identifier/enum helpers (`identifiers.py`).
 
 ---
 
-## 📋 Prerequisites
+## Project Structure
 
-Before running the backend, make sure you have:
-1. **Python**: Python 3.10+ (Tested on Python 3.14.6).
-2. **Ollama**: Installed and running locally ([ollama.com](https://ollama.com)).
-   - Verify: `ollama --version`
-   - Model: Ensure `qwen2.5:1.5b` is downloaded (`ollama pull qwen2.5:1.5b`).
-3. **PostgreSQL / Neon Account**: A Neon serverless PostgreSQL connection string (or local PostgreSQL instance).
-
----
-
-## 📁 Project Structure
-
-```
-backend/
+```text
+BackEnd/
 ├── app/
-│   ├── __init__.py
-│   ├── main.py                     # FastAPI application factory, CORS, exception handlers
+│   ├── main.py                         # FastAPI app initialization, CORS, global 500 handler
+│   ├── api/
+│   │   ├── routes/
+│   │   │   ├── health.py               # /health, /health/ollama, /health/db
+│   │   │   ├── interview.py            # Standalone Q&A, RAG Q&A, RAG eval, session endpoints
+│   │   │   ├── documents.py            # PDF upload, URL ingest, status, document-grounded Q&A
+│   │   │   ├── sources.py              # Unified source URL ingest, status, listing, sessions
+│   │   │   └── github.py               # GitHub MCP validation, README, files, repo Q&A
+│   │   └── v1/
+│   │       └── router.py               # Aggregates API v1 routers
 │   ├── core/
-│   │   ├── __init__.py
-│   │   └── config.py               # Pydantic Settings, CORS origins, environment loader
+│   │   ├── config.py                   # Pydantic Settings (env-driven configuration)
+│   │   ├── exceptions.py               # Shared domain-to-HTTP exception translators
+│   │   └── logging.py                  # Centralized structured logging configuration
 │   ├── db/
-│   │   ├── __init__.py             # Database session and connection exports
-│   │   ├── base.py                 # SQLAlchemy DeclarativeBase
-│   │   └── session.py              # Managed sessionmaker, URL normalization, masking
+│   │   ├── base.py                     # SQLAlchemy DeclarativeBase
+│   │   └── session.py                  # Engine, sessionmaker, get_db, get_db_optional
 │   ├── models/
-│   │   ├── __init__.py             # SQLAlchemy models index
-│   │   └── interview.py            # InterviewSession, InterviewQuestion, AnswerEvaluation
+│   │   └── interview.py                # InterviewSession, InterviewQuestion, AnswerEvaluation, DocumentSource
+│   ├── repositories/
+│   │   ├── interview_repository.py     # SQLAlchemy persistence for sessions & evaluations
+│   │   └── source_repository.py        # SQLAlchemy persistence for DocumentSource records
 │   ├── schemas/
-│   │   ├── __init__.py             # Central schema exports
-│   │   ├── health.py               # Health check response schemas
-│   │   ├── interview.py            # Question generation & evaluation schemas
-│   │   └── session.py              # Session management, questions, summary schemas
+│   │   ├── document.py                 # Document upload, URL ingestion, source schemas
+│   │   ├── evaluation.py               # RAG Triad evaluation request/response schemas
+│   │   ├── github.py                   # GitHub repo & MCP response schemas
+│   │   ├── health.py                   # Health check schemas
+│   │   ├── interview.py                # Question, evaluation, and RAG schemas
+│   │   └── session.py                  # Session lifecycle and summary schemas
 │   ├── services/
-│   │   ├── __init__.py             # Service exports
-│   │   ├── ollama_service.py       # Async HTTPX client for Ollama LLM integration
-│   │   └── session_service.py      # Stateful interview lifecycle & persistence manager
-│   └── api/
-│       ├── __init__.py
-│       └── routes/
-│           ├── __init__.py
-│           ├── health.py           # Backend, Ollama, and Database health checks
-│           └── interview.py        # Question, evaluation, session CRUD and listing
+│   │   ├── answer_evaluation_service.py # Candidate answer evaluation orchestration
+│   │   ├── chunking_service.py         # Overlap-aware semantic text chunker
+│   │   ├── document_service.py         # End-to-end PDF upload -> Pinecone -> Source pipeline
+│   │   ├── embedding_service.py        # Ollama 768-dim embedding client with batching & fallback
+│   │   ├── github_mcp_service.py       # Read-only GitHub MCP stdio client service
+│   │   ├── hybrid_search_service.py    # Pure-Python BM25Okapi + Reciprocal Rank Fusion
+│   │   ├── ollama_service.py           # Async HTTPX Ollama chat & answer evaluation client
+│   │   ├── pdf_service.py              # PDF magic-header, encryption, size/page & pypdf extractor
+│   │   ├── pinecone_service.py         # Pinecone 768-dim dense vector upsert/query/delete
+│   │   ├── question_generation_service.py # Standalone & session question generation
+│   │   ├── rag_eval_service.py         # RAG Triad judge (LLM + heuristic fallback)
+│   │   ├── rag_question_service.py     # Document & multi-question source-grounded RAG service
+│   │   ├── repo_question_service.py    # GitHub repository-grounded question generator
+│   │   ├── reranker_service.py         # Post-retrieval reranking (FlashRank / Ollama / heuristic)
+│   │   ├── retrieval_service.py        # Dense retrieval + hybrid fusion + reranking pipeline
+│   │   ├── session_service.py          # Interview session state machine & summary aggregator
+│   │   ├── source_service.py           # Source metadata tracking & readiness validation
+│   │   └── url_service.py              # SSRF-safe webpage & GitHub URL ingestion
+│   ├── integrations/
+│   │   ├── github_mcp/
+│   │   │   └── protocol.py             # MCP read-only whitelist & content/error decoders
+│   │   └── ollama/
+│   │       └── helpers.py              # Shared /api/tags model discovery helpers
+│   └── utils/
+│       ├── html_parser.py              # Standard-library HTML text & title extractor
+│       ├── identifiers.py              # Document ID normalization & enum serialization
+│       └── json_parser.py              # LLM markdown-fence stripping & safe JSON decoding
 ├── alembic/
-│   ├── env.py                      # Alembic migration runner & metadata binder
-│   ├── script.py.mako              # Migration script template
-│   └── versions/
-│       └── 20261016_0001_initial_interview_tables.py  # Initial PostgreSQL schema
-├── tests/
-│   ├── __init__.py
-│   ├── test_cors.py                # CORS, contract validation, and safe 500 error tests
-│   ├── test_database.py            # SQLAlchemy models, SQLite isolated DB persistence tests
-│   ├── test_health.py              # Health check endpoint unit tests (mocked)
-│   ├── test_interview.py           # Standalone question & evaluation unit tests (mocked)
-│   └── test_session.py             # Session lifecycle and listing unit tests (mocked)
-├── alembic.ini                     # Alembic configuration
-├── .env.example                    # Safe environment template (no real secrets)
-├── .env                            # Local environment configuration (git-ignored)
-├── .gitignore                      # Git ignore file
-├── requirements.txt                # Pinned Python dependencies
-└── README.md                       # Comprehensive documentation
+│   ├── env.py                          # Alembic migration environment
+│   └── versions/                       # Versioned database schema migrations
+├── tests/                              # Offline unit & API integration tests (pytest)
+├── alembic.ini
+├── requirements.txt
+└── .env.example
 ```
 
 ---
 
-## 🚀 Quickstart Guide
+## Setup & Installation
 
-### 1. Activate the Virtual Environment
-
-Always work inside the Python virtual environment:
+### 1. Create and Activate Virtual Environment
 
 ```bash
-# Navigate to the backend directory
-cd /Users/rahul/Documents/Ai-Interview-Platform/BackEnd
-
-# Create a virtual environment (if not already created)
+cd BackEnd
 python3 -m venv .venv
-
-# Activate the virtual environment:
-# On macOS / Linux:
 source .venv/bin/activate
-# On Windows (PowerShell):
-# .venv\Scripts\Activate.ps1
 ```
 
 ### 2. Install Dependencies
-
-Install all pinned project dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure Environment Variables (`.env`)
+### 3. Configure Environment Variables
 
-Copy the template `.env.example` to `.env`:
+Copy `.env.example` to `.env` and fill in your credentials (never commit `.env`):
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` to configure your settings (**never commit real credentials to git**):
+Key environment variables:
 
-```env
-# Application Configuration
-APP_NAME="AI Interview Preparation Platform"
-APP_ENV=development
-API_V1_PREFIX=/api/v1
+| Variable | Description | Default |
+|---|---|---|
+| `APP_NAME` | Application title | `AI Interview Preparation Platform` |
+| `APP_ENV` | Environment (`development`, `production`) | `development` |
+| `API_V1_PREFIX` | API route prefix | `/api/v1` |
+| `CORS_ORIGINS` | Allowed frontend origins (CSV or JSON list) | `http://localhost:5173,http://127.0.0.1:5173` |
+| `OLLAMA_BASE_URL` | Local Ollama server URL | `http://localhost:11434` |
+| `OLLAMA_MODEL` | Chat completion model | `qwen2.5:1.5b` |
+| `OLLAMA_EMBEDDING_MODEL` | Dense embedding model (768-dim) | `nomic-embed-text` |
+| `DATABASE_URL` | Neon PostgreSQL DSN (`postgresql+psycopg://...`) | `None` (in-memory fallback if unset) |
+| `PINECONE_API_KEY` | Pinecone API key | `None` |
+| `PINECONE_INDEX_NAME` | Standard dense vector index name | `ai-interview-prep-v2` |
+| `PINECONE_DIMENSION` | Vector dimension matching `nomic-embed-text` | `768` |
+| `GITHUB_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` | Optional read-only PAT for GitHub MCP | `None` |
 
-# CORS Allowed Origins (comma-separated for frontend integration)
-CORS_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
-
-# Ollama LLM Service Configuration
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:1.5b
-OLLAMA_TIMEOUT_SECONDS=60.0
-
-# Neon PostgreSQL Database Configuration
-# Format: postgresql+psycopg://USER:PASSWORD@HOST.neon.tech/neondb?sslmode=require
-DATABASE_URL="postgresql+psycopg://USER:PASSWORD@ep-sample-host.us-east-2.aws.neon.tech/neondb?sslmode=require"
-```
-
-> [!TIP]
-> If `DATABASE_URL` is omitted, the backend runs in **offline in-memory mode** for lightweight local testing without a database connection.
-
-### 4. Run Database Migrations
-
-Apply database schema migrations to your PostgreSQL database:
+Ensure Ollama models are pulled locally:
 
 ```bash
-# Check current migration version
-alembic current
+ollama pull qwen2.5:1.5b
+ollama pull nomic-embed-text
+```
 
-# Run migrations to the latest revision
+---
+
+## Running the Application
+
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+---
+
+## Database Migrations (Alembic)
+
+With `DATABASE_URL` configured in `.env`:
+
+```bash
+# Apply all pending migrations
 alembic upgrade head
+
+# Check current migration revision
+alembic current
 ```
 
-### 5. Ensure Ollama is Running
+> If `DATABASE_URL` is omitted, the API operates in in-memory mode for local development and tests.
 
-Verify Ollama is active and hosting the configured model:
+---
+
+## Running Tests
+
+The test suite uses isolated SQLite in-memory databases and mocked external clients (Ollama, Pinecone, GitHub MCP) so it runs deterministically offline:
 
 ```bash
-ollama list
-```
-
-If Ollama is stopped, start it in a separate terminal:
-```bash
-ollama serve
-```
-
-### 6. Start the FastAPI Server
-
-Launch the development server with live reload:
-
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-The backend is now live at:
-- **Base URL**: `http://127.0.0.1:8000`
-- **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **Alternative ReDoc UI**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-
----
-
-## 🌐 Frontend Integration & CORS Configuration
-
-The backend is pre-configured with FastAPI's `CORSMiddleware` to integrate smoothly with a **React + TypeScript (Vite)** frontend:
-
-| Setting | Value | Description |
-| :--- | :--- | :--- |
-| **Allowed Origins** | `http://localhost:5173`<br>`http://127.0.0.1:5173` | Configured via `CORS_ORIGINS` in `.env` |
-| **Allowed Methods** | `GET, POST, PUT, DELETE, OPTIONS, PATCH` | All required standard REST verbs |
-| **Allowed Headers** | `*` (`Content-Type`, `Authorization`, etc.) | Custom frontend headers permitted |
-| **Allow Credentials**| `False` | Cookies/credentials disabled until authentication is introduced |
-
----
-
-## 📡 API Reference & JSON Contracts
-
-All endpoints are prefixed with `/api/v1` (configurable via `API_V1_PREFIX`).
-
-### 1. Health Endpoints
-
-#### `GET /api/v1/health`
-Check core FastAPI backend operational status.
-
-**Response (`200 OK`):**
-```json
-{
-  "status": "ok",
-  "app_name": "AI Interview Preparation Platform",
-  "environment": "development"
-}
-```
-
-#### `GET /api/v1/health/ollama`
-Verify Ollama server reachability and model availability.
-
-**Response (`200 OK`):**
-```json
-{
-  "status": "ok",
-  "ollama_connected": true,
-  "configured_model": "qwen2.5:1.5b",
-  "model_available": true,
-  "available_models": ["qwen2.5:1.5b"]
-}
-```
-
-#### `GET /api/v1/health/db`
-Verify PostgreSQL database connectivity (credentials masked).
-
-**Response (`200 OK`):**
-```json
-{
-  "status": "ok",
-  "database": "postgresql",
-  "database_connected": true,
-  "database_configured": true
-}
-```
-
----
-
-### 2. Standalone AI Generation & Evaluation
-
-#### `POST /api/v1/interview/question`
-Generate an isolated interview question using Qwen 2.5 without session persistence.
-
-**Request Body:**
-```json
-{
-  "role": "Frontend Developer",
-  "experience_level": "Junior",
-  "difficulty": "Medium",
-  "topic": "React Hooks",
-  "question_type": "Technical"
-}
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "question": "Can you explain the differences between useEffect and useLayoutEffect in React?",
-  "expected_answer_points": [
-    "useEffect runs asynchronously after DOM paint",
-    "useLayoutEffect runs synchronously immediately after DOM mutations before paint",
-    "useLayoutEffect is typically used for measuring layout or synchronous DOM updates"
-  ],
-  "follow_up_question": "When might using useLayoutEffect degrade application performance?",
-  "difficulty": "Medium",
-  "topic": "React Hooks"
-}
-```
-
-#### `POST /api/v1/interview/evaluate`
-Evaluate an isolated candidate answer against expected criteria.
-
-**Request Body:**
-```json
-{
-  "question": "Explain the difference between useEffect and useLayoutEffect.",
-  "expected_answer_points": [
-    "useEffect runs asynchronously after paint",
-    "useLayoutEffect runs synchronously before paint"
-  ],
-  "candidate_answer": "useEffect fires asynchronously after the browser paints the screen. useLayoutEffect runs synchronously before painting, which is helpful to prevent UI flicker when calculating dimensions."
-}
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "overall_score": 90,
-  "rating": "Excellent",
-  "correct_points": [
-    "useEffect runs asynchronously after paint",
-    "useLayoutEffect runs synchronously before paint"
-  ],
-  "missing_points": [],
-  "strengths": [
-    "Accurately differentiated asynchronous vs synchronous execution timings",
-    "Identified use case of preventing visual flicker"
-  ],
-  "improvements": [
-    "Mention performance implications when layout computations take too long"
-  ],
-  "sample_answer": "useEffect fires asynchronously after DOM paint is complete. useLayoutEffect fires synchronously after layout mutations but before browser paint, making it suitable for DOM measurements."
-}
-```
-
----
-
-### 3. Interview Session Management
-
-#### `POST /api/v1/interview/sessions`
-Initialize a new interview session and persist configuration to PostgreSQL.
-
-**Request Body:**
-```json
-{
-  "role": "Frontend Developer",
-  "experience_level": "Junior",
-  "difficulty": "Medium",
-  "topic": "React Hooks",
-  "question_type": "Technical",
-  "total_questions": 3
-}
-```
-
-**Response (`201 Created`):**
-```json
-{
-  "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-  "role": "Frontend Developer",
-  "experience_level": "Junior",
-  "difficulty": "Medium",
-  "topic": "React Hooks",
-  "question_type": "Technical",
-  "total_questions": 3,
-  "completed_questions": 0,
-  "current_question_number": 0,
-  "status": "in_progress",
-  "questions": [],
-  "created_at": "2026-10-26T06:00:00+00:00",
-  "updated_at": "2026-10-26T06:00:00+00:00"
-}
-```
-
-#### `GET /api/v1/interview/sessions`
-List interview sessions ordered by most recent, with optional pagination.
-
-**Query Parameters:**
-- `limit` (int, default `50`): Maximum sessions to retrieve.
-- `skip` (int, default `0`): Number of sessions to skip.
-
-**Response (`200 OK`):**
-```json
-[
-  {
-    "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-    "role": "Frontend Developer",
-    "experience_level": "Junior",
-    "difficulty": "Medium",
-    "topic": "React Hooks",
-    "question_type": "Technical",
-    "total_questions": 3,
-    "completed_questions": 1,
-    "current_question_number": 1,
-    "status": "in_progress",
-    "questions": [...],
-    "created_at": "2026-10-26T06:00:00+00:00",
-    "updated_at": "2026-10-26T06:05:00+00:00"
-  }
-]
-```
-
-#### `GET /api/v1/interview/sessions/{session_id}`
-Retrieve complete session details, question history, and evaluations.
-
-**Response (`200 OK`):**
-```json
-{
-  "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-  "role": "Frontend Developer",
-  "experience_level": "Junior",
-  "difficulty": "Medium",
-  "topic": "React Hooks",
-  "question_type": "Technical",
-  "total_questions": 3,
-  "completed_questions": 1,
-  "current_question_number": 1,
-  "status": "in_progress",
-  "questions": [
-    {
-      "question_number": 1,
-      "question": "Can you explain the differences between useEffect and useLayoutEffect in React?",
-      "expected_answer_points": [
-        "useEffect runs asynchronously after DOM paint",
-        "useLayoutEffect runs synchronously immediately after DOM mutations before paint"
-      ],
-      "follow_up_question": "When might using useLayoutEffect degrade application performance?",
-      "difficulty": "Medium",
-      "topic": "React Hooks",
-      "candidate_answer": "useEffect runs asynchronously after paint...",
-      "evaluation": {
-        "overall_score": 90,
-        "rating": "Excellent",
-        "correct_points": ["useEffect runs asynchronously after paint"],
-        "missing_points": [],
-        "strengths": ["Accurately differentiated asynchronous vs synchronous execution"],
-        "improvements": [],
-        "sample_answer": "..."
-      }
-    }
-  ],
-  "created_at": "2026-10-26T06:00:00+00:00",
-  "updated_at": "2026-10-26T06:05:00+00:00"
-}
-```
-
-#### `POST /api/v1/interview/sessions/{session_id}/next-question`
-Generate the next tailored question and persist it to PostgreSQL.
-
-**Response (`200 OK`):**
-```json
-{
-  "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-  "question_number": 1,
-  "total_questions": 3,
-  "question": "Can you explain the differences between useEffect and useLayoutEffect in React?",
-  "expected_answer_points": [
-    "useEffect runs asynchronously after DOM paint",
-    "useLayoutEffect runs synchronously immediately after DOM mutations before paint"
-  ],
-  "follow_up_question": "When might using useLayoutEffect degrade application performance?",
-  "difficulty": "Medium",
-  "topic": "React Hooks"
-}
-```
-
-#### `POST /api/v1/interview/sessions/{session_id}/answers`
-Submit candidate answer and record rubric-aligned AI evaluation.
-
-**Request Body:**
-```json
-{
-  "candidate_answer": "useEffect fires asynchronously after the browser paints the screen. useLayoutEffect runs synchronously before painting to prevent flickering."
-}
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-  "question_number": 1,
-  "completed_questions": 1,
-  "total_questions": 3,
-  "status": "in_progress",
-  "evaluation": {
-    "overall_score": 90,
-    "rating": "Excellent",
-    "correct_points": ["useEffect runs asynchronously after paint"],
-    "missing_points": [],
-    "strengths": ["Accurately differentiated execution timings"],
-    "improvements": [],
-    "sample_answer": "..."
-  }
-}
-```
-
-#### `POST /api/v1/interview/sessions/{session_id}/complete`
-Mark session completed and calculate aggregate statistics and strengths.
-
-**Response (`200 OK`):**
-```json
-{
-  "session_id": "e058e49c-d69a-4ffb-b949-ded55736acca",
-  "role": "Frontend Developer",
-  "topic": "React Hooks",
-  "total_questions": 3,
-  "questions_answered": 1,
-  "average_score": 90.0,
-  "overall_rating": "Excellent",
-  "aggregated_strengths": ["Accurately differentiated execution timings"],
-  "aggregated_improvement_areas": [],
-  "session_status": "completed"
-}
-```
-
----
-
-### 4. Standard Error Response Contract
-
-The backend adheres strictly to consistent JSON error responses:
-
-| HTTP Status | Condition | Response Structure |
-| :--- | :--- | :--- |
-| **`422 Unprocessable Entity`** | Invalid or missing request body fields | `{"detail": [{"loc": ["body", "role"], "msg": "Field required", "type": "missing"}]}` |
-| **`404 Not Found`** | Requested session ID does not exist | `{"detail": "Interview session '<id>' not found."}` |
-| **`400 Bad Request`** | Invalid state transition (e.g. question already answered) | `{"detail": "Current question #1 has not been answered yet..."}` |
-| **`500 Internal Server Error`** | Unhandled internal exception (secrets masked) | `{"detail": "An unexpected internal server error occurred."}` |
-| **`502 Bad Gateway`** | Ollama LLM returned malformed JSON | `{"detail": "The AI model returned an invalid JSON response."}` |
-| **`503 Service Unavailable`** | Ollama LLM or Neon Database unreachable | `{"detail": "AI inference service is currently unavailable..."}` |
-
----
-
-## 🧪 Running Automated Tests
-
-The automated test suite runs 100% offline without requiring a live Ollama instance or Neon database connection. Tests use isolated SQLite in-memory databases and dependency-injected mocks:
-
-```bash
-# Activate your virtual environment
-source .venv/bin/activate
-
-# Run all tests
 pytest -v
-
-# Or run via the virtual environment binary directly:
-.venv/bin/pytest -v
 ```
 
-### Test Suite Structure
-
-| Test File | Scope | Test Count |
-| :--- | :--- | :--- |
-| `tests/test_cors.py` | CORS preflight/actual requests, 422 validations, 404 missing sessions, safe 500 handler | 15 tests |
-| `tests/test_database.py` | SQLAlchemy models, URL normalization & masking, isolated SQLite persistence | 20 tests (1 live skipped) |
-| `tests/test_health.py` | Root status, backend health, Ollama health, DB connectivity | 5 tests |
-| `tests/test_interview.py` | Standalone question generation & evaluation, Ollama mocking, error handling | 23 tests |
-| `tests/test_session.py` | Multi-question session lifecycle, answer recording, session listing, summaries | 30 tests |
-| **Total** | | **93 tests (92 passed, 1 skipped)** |
+To also run the live Neon PostgreSQL connectivity test, set `NEON_DATABASE_URL` in your environment.
 
 ---
 
-## 💡 Frontend Integration Guide (React + TypeScript)
+## RAG & GitHub MCP Integration Flow
 
-For frontend developers connecting a React / Next.js client to this backend:
-
-1. **Base API URL**: Set your API client base URL to `http://127.0.0.1:8000/api/v1`.
-2. **CORS Headers**: Ensure requests originate from `http://localhost:5173` or `http://127.0.0.1:5173` with standard `Content-Type: application/json`.
-3. **Session Flow**:
-   - `POST /interview/sessions` -> Store `session_id` in React state.
-   - `POST /interview/sessions/{session_id}/next-question` -> Fetch question for candidate.
-   - `POST /interview/sessions/{session_id}/answers` -> Submit candidate answer and render evaluation rubric.
-   - `POST /interview/sessions/{session_id}/complete` -> Render final interview score report and aggregated feedback.
+1. **Ingestion (`DocumentService` / `URLService`)**:
+   - **PDFs**: Validated for magic header, encryption, page/size limits (`PDFService`), extracted, chunked (`TextChunkingService`), embedded via Ollama `nomic-embed-text` (`EmbeddingService`), and upserted into Pinecone (`PineconeService`) with `document_id` isolation metadata.
+   - **Public URLs**: Validated against SSRF (private/loopback/metadata IPs blocked on initial host and every HTTP redirect hop), extracted via `HTMLTextExtractor`, chunked, embedded, and indexed in Pinecone.
+   - **GitHub URLs & Repo Inspection (`GitHubMCPService`)**: Connects over `stdio` to the MCP server using the `mcp` SDK, enforces `READ_ONLY_TOOL_WHITELIST`, guards against path traversal, and feeds README + key source files into either Pinecone indexing (`URLService`) or direct repo-grounded question generation (`RepoQuestionService`).
+2. **Retrieval & Grounded Generation (`RetrievalService` -> `RAGQuestionService`)**:
+   - Queries Pinecone with a strict `document_id` metadata filter, filters by `RAG_MIN_RELEVANCE_SCORE`, applies optional BM25 + RRF hybrid fusion (`HybridSearchService`) and post-retrieval reranking (`RerankerService`), and generates citation-backed interview questions via `OllamaService`.
+   - `RAGEvaluationService` evaluates generated questions against retrieved chunks using the RAG Triad (Faithfulness, Context Relevance, Question Relevance).

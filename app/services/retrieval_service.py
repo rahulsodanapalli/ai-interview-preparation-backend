@@ -1,7 +1,8 @@
-"""Semantic Retrieval Service for RAG vector search in Pinecone.
+"""Semantic Retrieval Service for RAG vector search in Pinecone with Hybrid Search and Reranking.
 
 Coordinates embedding generation for query strings, executes isolated vector similarity
-searches scoped to specific documents in Pinecone, and returns structured chunk citations.
+searches scoped to specific documents in Pinecone, applies BM25 lexical search fusion,
+re-ranks candidate chunks, and returns structured chunk citations.
 """
 
 from dataclasses import dataclass, field
@@ -10,12 +11,17 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends
 
 from app.core.config import settings
+from app.utils.identifiers import normalize_document_id
 from app.services.embedding_service import (
     EmbeddingConnectionError,
     EmbeddingService,
     EmbeddingServiceError,
     EmbeddingTimeoutError,
     get_embedding_service,
+)
+from app.services.hybrid_search_service import (
+    HybridSearchService,
+    get_hybrid_search_service,
 )
 from app.services.pinecone_service import (
     PineconeConfigurationError,
@@ -27,6 +33,10 @@ from app.services.pinecone_service import (
     PineconeServiceError,
     PineconeTimeoutError,
     get_pinecone_service,
+)
+from app.services.reranker_service import (
+    RerankerService,
+    get_reranker_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,11 +95,13 @@ class RetrievedChunk:
 
 
 class RetrievalService:
-    """Orchestrates query embedding generation and document-scoped vector retrieval.
+    """Orchestrates query embedding generation, document-scoped vector retrieval, hybrid search, and reranking.
 
     Attributes:
         embedding_service: Service for generating 768-dim embeddings via Ollama.
         pinecone_service: Service for executing vector queries against Pinecone.
+        hybrid_search_service: Service for combining dense vector search with BM25 lexical search.
+        reranker_service: Service for post-retrieval cross-encoder / LLM reranking.
         min_score: Configured minimum cosine similarity score threshold for relevance.
     """
 
@@ -97,10 +109,21 @@ class RetrievalService:
         self,
         embedding_service: Optional[EmbeddingService] = None,
         pinecone_service: Optional[PineconeService] = None,
+        hybrid_search_service: Optional[HybridSearchService] = None,
+        reranker_service: Optional[RerankerService] = None,
         min_score: Optional[float] = None,
     ):
-        self.embedding_service = embedding_service or get_embedding_service()
-        self.pinecone_service = pinecone_service or get_pinecone_service()
+        if embedding_service is not None or pinecone_service is not None:
+            self.embedding_service = embedding_service or get_embedding_service()
+            self.pinecone_service = pinecone_service or get_pinecone_service()
+            self.hybrid_search_service = hybrid_search_service
+            self.reranker_service = reranker_service
+        else:
+            self.embedding_service = get_embedding_service()
+            self.pinecone_service = get_pinecone_service()
+            self.hybrid_search_service = hybrid_search_service or get_hybrid_search_service()
+            self.reranker_service = reranker_service or get_reranker_service()
+
         self.min_score = (
             min_score
             if min_score is not None
@@ -139,11 +162,7 @@ class RetrievalService:
             PineconeServiceError: If Pinecone index query fails.
         """
         # 1. Validate inputs
-        if not document_id or not str(document_id).strip():
-            raise InvalidDocumentIdError("document_id must not be empty or whitespace only.")
-        clean_doc_id = str(document_id).strip()
-        if "#" in clean_doc_id:
-            clean_doc_id = clean_doc_id.split("#")[0].strip()
+        clean_doc_id = normalize_document_id(document_id)
         if not clean_doc_id:
             raise InvalidDocumentIdError("document_id must not be empty or whitespace only.")
 
@@ -179,8 +198,8 @@ class RetrievalService:
             logger.info("No matching chunks retrieved for document '%s'.", clean_doc_id)
             return []
 
-        # 4. Convert to structured RetrievedChunk instances and filter by relevance threshold
-        retrieved: List[RetrievedChunk] = []
+        # 4. Filter by minimum cosine similarity relevance threshold
+        filtered_matches: List[Dict[str, Any]] = []
         for match in raw_matches:
             score = float(match.get("score", 0.0)) if match.get("score") is not None else 0.0
             if effective_min_score is not None and score < effective_min_score:
@@ -192,8 +211,49 @@ class RetrievalService:
                     effective_min_score,
                 )
                 continue
+            filtered_matches.append(match)
 
+        if not filtered_matches:
+            logger.info(
+                "All %d retrieved chunks for document '%s' fell below minimum relevance threshold %.2f.",
+                len(raw_matches),
+                clean_doc_id,
+                effective_min_score,
+            )
+            return []
+
+        # 5. Stage 1: Hybrid Search Fusion (BM25 Lexical + Reciprocal Rank Fusion)
+        fused_matches = filtered_matches
+        if self.hybrid_search_service and getattr(self.hybrid_search_service, "enabled", True):
+            try:
+                fused_matches = self.hybrid_search_service.fuse_matches(
+                    dense_matches=filtered_matches,
+                    query_text=clean_query,
+                    top_k=len(filtered_matches),
+                )
+            except Exception as exc:
+                logger.warning("Hybrid search fusion encountered error: %s. Continuing with dense matches.", exc)
+                fused_matches = filtered_matches
+
+        # 6. Stage 2: Reranking (Cross-Encoder / LLM scoring / Heuristic)
+        reranked_matches = fused_matches
+        if self.reranker_service and getattr(self.reranker_service, "enabled", True):
+            try:
+                reranked_matches = await self.reranker_service.rerank_matches(
+                    query=clean_query,
+                    candidates=fused_matches,
+                    top_k=len(fused_matches),
+                )
+            except Exception as exc:
+                logger.warning("Reranking encountered error: %s. Continuing with hybrid matches.", exc)
+                reranked_matches = fused_matches
+
+        # 7. Convert to structured RetrievedChunk instances
+        retrieved: List[RetrievedChunk] = []
+        for match in reranked_matches[:top_k]:
             meta = match.get("metadata", {})
+            orig_dense_score = meta.get("dense_score", match.get("score", 0.0))
+            score = float(orig_dense_score) if orig_dense_score is not None else 0.0
             chunk = RetrievedChunk(
                 chunk_id=match.get("id", ""),
                 chunk_index=match.get("chunk_index", meta.get("chunk_index", 0)),
@@ -205,29 +265,25 @@ class RetrievalService:
             )
             retrieved.append(chunk)
 
-        if not retrieved and raw_matches:
-            logger.info(
-                "All %d retrieved chunks for document '%s' fell below minimum relevance threshold %.2f.",
-                len(raw_matches),
-                clean_doc_id,
-                effective_min_score,
-            )
-        else:
-            logger.info(
-                "Successfully retrieved %d relevant chunks for document '%s' (top score=%.4f).",
-                len(retrieved),
-                clean_doc_id,
-                retrieved[0].score if retrieved else 0.0,
-            )
+        logger.info(
+            "Successfully retrieved %d relevant chunks for document '%s' (top score=%.4f).",
+            len(retrieved),
+            clean_doc_id,
+            retrieved[0].score if retrieved else 0.0,
+        )
         return retrieved
 
 
 def get_retrieval_service(
     embedding_service: EmbeddingService = Depends(get_embedding_service),
     pinecone_service: PineconeService = Depends(get_pinecone_service),
+    hybrid_search_service: HybridSearchService = Depends(get_hybrid_search_service),
+    reranker_service: RerankerService = Depends(get_reranker_service),
 ) -> RetrievalService:
     """FastAPI dependency provider for RetrievalService with injected dependencies."""
     return RetrievalService(
         embedding_service=embedding_service,
         pinecone_service=pinecone_service,
+        hybrid_search_service=hybrid_search_service,
+        reranker_service=reranker_service,
     )

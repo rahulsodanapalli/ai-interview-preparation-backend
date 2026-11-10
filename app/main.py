@@ -1,3 +1,5 @@
+"""FastAPI application entrypoint, middleware registration, and router mounting."""
+
 import logging
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -5,9 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.api.routes import documents, github, health, interview, sources
+from app.api.v1.router import api_v1_router
 from app.core.config import settings
+from app.core.logging import configure_logging
 
+configure_logging(app_env=settings.APP_ENV)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -49,13 +53,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         content={"detail": "An unexpected internal server error occurred."},
     )
 
+
 # Mount API v1 Routers
 api_v1_prefix = settings.API_V1_PREFIX
-app.include_router(health.router, prefix=api_v1_prefix)
-app.include_router(interview.router, prefix=api_v1_prefix)
-app.include_router(documents.router, prefix=api_v1_prefix)
-app.include_router(github.router, prefix=api_v1_prefix)
-app.include_router(sources.router, prefix=api_v1_prefix)
+app.include_router(api_v1_router, prefix=api_v1_prefix)
 
 
 @app.get(
@@ -76,4 +77,3 @@ async def root():
         "document_upload": f"{api_v1_prefix}/documents/upload",
         "github_validate": f"{api_v1_prefix}/github/validate",
     }
-

@@ -8,19 +8,26 @@ guards against path traversal, adheres to size limits, and guarantees zero token
 """
 
 import asyncio
-import base64
 from contextlib import asynccontextmanager
-import json
 import logging
 import os
 import shutil
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
 
 from app.core.config import settings
+from app.integrations.github_mcp.protocol import (
+    FALLBACK_README_CANDIDATES,
+    READ_ONLY_TOOL_WHITELIST,
+    decode_base64_or_text,
+    extract_mcp_error_text,
+    is_readme_filename,
+    parse_mcp_tool_result_content,
+    rank_readme_filename,
+)
 from app.schemas.github import (
     RepoFileContentResponse,
     RepoFileItem,
@@ -74,32 +81,8 @@ class GitHubFileTooLargeError(GitHubServiceError):
     """Raised when a requested file exceeds the configured maximum byte limit."""
 
 
-# ============================================================================
-# Read-Only Security Guard Whitelist
-# ============================================================================
-
-READ_ONLY_TOOL_WHITELIST = {
-    "search_repositories",
-    "get_file_contents",
-    "search_code",
-    "list_commits",
-    "list_branches",
-    "list_tags",
-    "list_releases",
-    "get_commit",
-    "get_latest_release",
-    "get_release_by_tag",
-    "get_tag",
-    "list_issues",
-    "issue_read",
-    "list_pull_requests",
-    "pull_request_read",
-    "search_issues",
-    "search_pull_requests",
-    "search_users",
-    "ui_get",
-    "list_repository_collaborators",
-}
+# Re-exported from app.integrations.github_mcp.protocol for backward compatibility
+__whitelist__ = READ_ONLY_TOOL_WHITELIST
 
 
 # ============================================================================
@@ -317,54 +300,12 @@ class GitHubMCPService:
         # 4. Check for is_error / isError flag in tool result
         is_error = getattr(result, "is_error", False) or getattr(result, "isError", False)
         if is_error:
-            err_parts = []
-            if getattr(result, "content", None):
-                for c in result.content:
-                    if hasattr(c, "text") and c.text:
-                        err_parts.append(c.text)
-                    elif hasattr(c, "resource"):
-                        res_obj = getattr(c, "resource", None)
-                        if res_obj and hasattr(res_obj, "text") and res_obj.text:
-                            err_parts.append(res_obj.text)
-            err_text = " ".join(err_parts).strip()
-            fake_exc = MCPError(code=-1, message=err_text or f"Tool '{tool_name}' returned error")
+            err_text = extract_mcp_error_text(result, tool_name)
+            fake_exc = MCPError(code=-1, message=err_text)
             self._handle_mcp_error(fake_exc, is_file_request=is_file_request)
 
         # 5. Parse response content
-        if not getattr(result, "content", None) or len(result.content) == 0:
-            return {}
-
-        # 5a. Look for EmbeddedResource blocks (official github-mcp-server returns file contents here)
-        for c in result.content:
-            if hasattr(c, "resource") and c.resource is not None:
-                embedded = c.resource
-                text_content = ""
-                if hasattr(embedded, "text") and embedded.text is not None:
-                    text_content = embedded.text
-                elif hasattr(embedded, "blob") and embedded.blob is not None:
-                    try:
-                        text_content = base64.b64decode(embedded.blob).decode("utf-8", errors="replace")
-                    except Exception:
-                        text_content = str(embedded.blob)
-
-                return {
-                    "content": text_content,
-                    "encoding": "utf-8",
-                    "uri": str(getattr(embedded, "uri", "")) if hasattr(embedded, "uri") else "",
-                    "mime_type": getattr(embedded, "mime_type", None),
-                    "size": len(text_content.encode("utf-8")),
-                }
-
-        # 5b. Parse TextContent blocks
-        first_content = result.content[0]
-        text_data = getattr(first_content, "text", "")
-        if not text_data:
-            return {}
-
-        try:
-            return json.loads(text_data)
-        except json.JSONDecodeError:
-            return text_data
+        return parse_mcp_tool_result_content(result)
 
     # ========================================================================
     # Read-Only MCP Tool Operations
@@ -432,27 +373,11 @@ class GitHubMCPService:
                 )
                 if isinstance(root_data, list):
                     for it in root_data:
-                        if isinstance(it, dict) and it.get("type") == "file":
-                            name = it.get("name", "").lower()
-                            stem, ext = os.path.splitext(name)
-                            if stem == "readme" and ext in [
-                                "",
-                                ".md",
-                                ".markdown",
-                                ".mdown",
-                                ".mkdn",
-                                ".rst",
-                                ".txt",
-                                ".text",
-                                ".adoc",
-                                ".asciidoc",
-                                ".org",
-                            ]:
-                                has_readme = True
-                                break
+                        if isinstance(it, dict) and it.get("type") == "file" and is_readme_filename(it.get("name", "")):
+                            has_readme = True
+                            break
                 elif isinstance(root_data, dict):
-                    name = root_data.get("name", "").lower()
-                    stem, ext = os.path.splitext(name)
+                    stem, _ = os.path.splitext(root_data.get("name", "").lower())
                     if stem == "readme":
                         has_readme = True
             except Exception:
@@ -527,16 +452,7 @@ class GitHubMCPService:
     @staticmethod
     def _safe_decode_content(content: Any, encoding: str) -> str:
         """Safely decode file content, handling both pre-decoded MCP text and raw base64."""
-        if not content or not isinstance(content, str):
-            return ""
-        if encoding == "base64":
-            try:
-                decoded_bytes = base64.b64decode(content.strip(), validate=True)
-                return decoded_bytes.decode("utf-8", errors="replace")
-            except Exception:
-                # If base64 validation fails (e.g. incorrect padding), the content is already plain text
-                return content
-        return content
+        return decode_base64_or_text(content, encoding)
 
     async def get_readme(
         self,
@@ -569,42 +485,14 @@ class GitHubMCPService:
 
         try:
             files_list = await self.list_files(owner_or_url=f"{owner}/{repo_name}", path="", ref=ref)
-            readme_candidates: List[RepoFileItem] = []
-            for item in files_list.items:
-                if item.type == "file":
-                    name_lower = item.name.lower()
-                    stem, ext = os.path.splitext(name_lower)
-                    if stem == "readme" and ext in [
-                        "",
-                        ".md",
-                        ".markdown",
-                        ".mdown",
-                        ".mkdn",
-                        ".rst",
-                        ".txt",
-                        ".text",
-                        ".adoc",
-                        ".asciidoc",
-                        ".org",
-                    ]:
-                        readme_candidates.append(item)
+            readme_candidates = [
+                item
+                for item in files_list.items
+                if item.type == "file" and is_readme_filename(item.name)
+            ]
 
             if readme_candidates:
-                def rank_readme(item: RepoFileItem) -> int:
-                    nl = item.name.lower()
-                    if nl == "readme.md":
-                        return 0
-                    if nl == "readme":
-                        return 1
-                    if any(nl.endswith(e) for e in [".markdown", ".mdown", ".mkdn"]):
-                        return 2
-                    if nl.endswith(".rst"):
-                        return 3
-                    if nl.endswith(".txt") or nl.endswith(".text"):
-                        return 4
-                    return 5
-
-                readme_candidates.sort(key=rank_readme)
+                readme_candidates.sort(key=lambda item: rank_readme_filename(item.name))
                 best_match = readme_candidates[0]
                 target_path = best_match.path
                 target_name = best_match.name
@@ -629,18 +517,8 @@ class GitHubMCPService:
             )
 
         # 3. Fallback: try common candidate paths sequentially
-        fallback_candidates = [
-            "README.md",
-            "README",
-            "readme.md",
-            "README.rst",
-            "README.txt",
-            "README.markdown",
-            "docs/README.md",
-            ".github/README.md",
-        ]
         last_exception: Optional[Exception] = None
-        for cand in fallback_candidates:
+        for cand in FALLBACK_README_CANDIDATES:
             try:
                 file_resp = await self.get_file_content(
                     owner_or_url=f"{owner}/{repo_name}",

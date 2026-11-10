@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.core.config import settings
+from app.integrations.ollama.helpers import extract_available_models, is_model_available
 
 logger = logging.getLogger(__name__)
 
@@ -108,17 +109,8 @@ class EmbeddingService:
             logger.error("Unexpected error during Ollama embedding health check: %s", exc)
             raise EmbeddingResponseError("Received malformed response from Ollama server.") from exc
 
-        raw_models = data.get("models", [])
-        available_models: List[str] = [
-            m.get("name") for m in raw_models if isinstance(m, dict) and m.get("name")
-        ]
-
-        configured = self.model
-        model_available = False
-        for m in available_models:
-            if m == configured or m.startswith(f"{configured}:") or configured.startswith(f"{m}:"):
-                model_available = True
-                break
+        available_models = extract_available_models(data)
+        model_available = is_model_available(self.model, available_models)
 
         return {
             "ollama_connected": True,
