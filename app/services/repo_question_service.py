@@ -5,10 +5,8 @@ and generates targeted, technical interview questions using the local Ollama LLM
 defending against prompt injection and providing precise evidence citations.
 """
 
-import json
 import logging
-import re
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from app.schemas.github import (
     RepoEvidence,
@@ -29,6 +27,7 @@ from app.services.ollama_service import (
     OllamaTimeoutError,
     get_ollama_service,
 )
+from app.utils.json_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -217,20 +216,16 @@ class RepoQuestionService:
             format="json",
         )
 
-        clean_output = raw_output.strip()
-        if clean_output.startswith("```"):
-            clean_output = re.sub(r"^```(?:json)?\s*", "", clean_output)
-            clean_output = re.sub(r"\s*```$", "", clean_output)
-            clean_output = clean_output.strip()
-
         try:
-            parsed = json.loads(clean_output)
-        except json.JSONDecodeError as exc:
+            parsed = parse_llm_json(
+                raw_output,
+                error_cls=OllamaResponseError,
+                decode_error_message="Failed to parse JSON response from local AI model.",
+                type_error_message="Local AI model returned an unexpected response structure.",
+            )
+        except OllamaResponseError:
             logger.error("Failed to decode JSON from Ollama for repository question: %s", raw_output)
-            raise OllamaResponseError("Failed to parse JSON response from local AI model.") from exc
-
-        if not isinstance(parsed, dict):
-            raise OllamaResponseError("Local AI model returned an unexpected response structure.")
+            raise
 
         return RepoQuestionResponse(
             question=parsed.get("question", ""),

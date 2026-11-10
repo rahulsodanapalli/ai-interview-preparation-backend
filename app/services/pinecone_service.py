@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover
 
 from app.core.config import settings
 from app.services.chunking_service import TextChunk
+from app.utils.identifiers import normalize_document_id
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +344,7 @@ class PineconeService:
         # Build metadata filter for document isolation
         combined_filter: Dict[str, Any] = {}
         if document_id:
-            clean_doc_id = document_id.split("#")[0].strip() if "#" in document_id else document_id.strip()
+            clean_doc_id = normalize_document_id(document_id)
             combined_filter["document_id"] = {"$eq": clean_doc_id}
         if filter_dict:
             for k, v in filter_dict.items():
@@ -426,12 +427,9 @@ class PineconeService:
         Returns:
             True if deletion was successfully requested.
         """
-        if not document_id or not document_id.strip():
+        clean_doc_id = normalize_document_id(document_id)
+        if not clean_doc_id:
             raise PineconeResponseError("document_id must not be empty for deletion.")
-
-        clean_doc_id = document_id.strip()
-        if "#" in clean_doc_id:
-            clean_doc_id = clean_doc_id.split("#")[0].strip()
         target_namespace = namespace if namespace is not None else self.namespace
         index = self.get_index()
 

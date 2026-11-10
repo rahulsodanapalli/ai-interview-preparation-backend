@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     # Excerpts scoring below this threshold are filtered out as irrelevant/noise.
     RAG_MIN_RELEVANCE_SCORE: float = 0.55
 
+    # Advanced RAG Settings (Hybrid Search, Reranking, Evaluation)
+    RAG_ENABLE_HYBRID_SEARCH: bool = True
+    RAG_HYBRID_ALPHA: float = 0.5  # Weight for dense vector search (1 - alpha for BM25)
+    RAG_CANDIDATE_POOL_SIZE: int = 15  # Candidate pool size retrieved from Pinecone before reranking
+    RAG_ENABLE_RERANKING: bool = True
+    RAG_RERANKER_TYPE: str = "auto"  # 'auto', 'flashrank', 'ollama', or 'rrf'
+
     # GitHub MCP Integration Settings (Day 6)
     # Optional personal access token for read-only repository inspection.
     # If not provided, public repositories will still be accessible within standard GitHub rate limits.

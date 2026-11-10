@@ -1,9 +1,9 @@
 """API routes for GitHub MCP repository inspection and repository-grounded question generation."""
 
-import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
+from app.core.exceptions import handle_github_errors
 from app.schemas.github import (
     RepoFileContentResponse,
     RepoFileRequest,
@@ -13,32 +13,9 @@ from app.schemas.github import (
     RepoQuestionRequest,
     RepoQuestionResponse,
     RepoReadmeResponse,
-    parse_repo_identifier,
 )
-from app.services.github_mcp_service import (
-    GitHubConnectionError,
-    GitHubFileNotFoundError,
-    GitHubFileTooLargeError,
-    GitHubMCPService,
-    GitHubPermissionError,
-    GitHubRateLimitError,
-    GitHubRepoNotFoundError,
-    GitHubServiceError,
-    GitHubTimeoutError,
-    GitHubValidationError,
-    get_github_service,
-)
-from app.services.ollama_service import (
-    OllamaConnectionError,
-    OllamaResponseError,
-    OllamaTimeoutError,
-)
-from app.services.repo_question_service import (
-    RepoQuestionService,
-    get_repo_question_service,
-)
-
-logger = logging.getLogger(__name__)
+from app.services.github_mcp_service import GitHubMCPService, get_github_service
+from app.services.repo_question_service import RepoQuestionService, get_repo_question_service
 
 router = APIRouter(prefix="/github", tags=["GitHub MCP"])
 
@@ -64,24 +41,8 @@ async def validate_repository(
     github_service: GitHubMCPService = Depends(get_github_service),
 ) -> RepoMetadataResponse:
     """Validate repository identifier and retrieve metadata."""
-    try:
+    with handle_github_errors():
         return await github_service.get_repository_metadata(payload.repo_url_or_name)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubPermissionError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except GitHubTimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GitHubConnectionError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitHubServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @router.get(
@@ -106,27 +67,10 @@ async def get_repository_readme(
     github_service: GitHubMCPService = Depends(get_github_service),
 ) -> RepoReadmeResponse:
     """Fetch repository README content."""
-    try:
+    with handle_github_errors(
+        file_not_found_detail="No README file was found in the specified repository."
+    ):
         return await github_service.get_readme(owner_or_url=repo, ref=ref)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubFileNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No README file was found in the specified repository.",
-        ) from exc
-    except GitHubPermissionError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except GitHubTimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GitHubConnectionError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitHubServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @router.get(
@@ -152,26 +96,8 @@ async def list_repository_files(
     github_service: GitHubMCPService = Depends(get_github_service),
 ) -> RepoFilesListResponse:
     """List repository files and subdirectories."""
-    try:
+    with handle_github_errors():
         return await github_service.list_files(owner_or_url=repo, path=path, ref=ref)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubFileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubPermissionError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except GitHubTimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GitHubConnectionError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitHubServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @router.post(
@@ -196,32 +122,12 @@ async def get_file_content(
     github_service: GitHubMCPService = Depends(get_github_service),
 ) -> RepoFileContentResponse:
     """Fetch content of a source file."""
-    try:
+    with handle_github_errors():
         return await github_service.get_file_content(
             owner_or_url=payload.repo_url_or_name,
             file_path=payload.file_path,
             ref=payload.ref,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubFileTooLargeError as exc:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc)) from exc
-    except GitHubRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubFileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubPermissionError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except GitHubTimeoutError as exc:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
-    except GitHubConnectionError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    except GitHubServiceError as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
 
 @router.post(
@@ -229,7 +135,10 @@ async def get_file_content(
     response_model=RepoQuestionResponse,
     status_code=status.HTTP_200_OK,
     summary="Generate Repository-Grounded Interview Question",
-    description="Retrieves repository context (README or source code) via GitHub MCP and prompts local Ollama (qwen2.5:1.5b) to generate a grounded technical question with citations.",
+    description=(
+        "Retrieves repository context (README or source code) via GitHub MCP and prompts "
+        "local Ollama (qwen2.5:1.5b) to generate a grounded technical question with citations."
+    ),
     responses={
         200: {"description": "Interview question generated successfully"},
         400: {"description": "Invalid repository identifier or parameter"},
@@ -246,39 +155,5 @@ async def generate_repo_question(
     repo_question_service: RepoQuestionService = Depends(get_repo_question_service),
 ) -> RepoQuestionResponse:
     """Generate interview question grounded in repository source code or README."""
-    try:
+    with handle_github_errors(wrap_generation_messages=True):
         return await repo_question_service.generate_repo_question(payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except GitHubRepoNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except GitHubPermissionError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except GitHubRateLimitError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except (OllamaConnectionError, GitHubConnectionError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Service unavailable: {exc}",
-        ) from exc
-    except (OllamaTimeoutError, GitHubTimeoutError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Request timed out: {exc}",
-        ) from exc
-    except OllamaResponseError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI model generation error: {exc}",
-        ) from exc
-    except GitHubServiceError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"GitHub service error: {exc}",
-        ) from exc
-    except Exception as exc:
-        logger.error("Unexpected error generating repository question: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected internal error occurred while generating the repository interview question.",
-        ) from exc

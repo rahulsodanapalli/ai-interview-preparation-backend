@@ -5,6 +5,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import handle_rag_question_errors, handle_url_ingestion_errors
 from app.db.session import get_db_optional
 from app.schemas.document import (
     SourceQuestionsRequest,
@@ -14,36 +15,10 @@ from app.schemas.document import (
     UrlIngestRequest,
 )
 from app.schemas.session import CreateSessionRequest, SessionDetailResponse
-from app.services.embedding_service import EmbeddingConnectionError, EmbeddingTimeoutError
-from app.services.ollama_service import (
-    OllamaConnectionError,
-    OllamaResponseError,
-    OllamaTimeoutError,
-)
-from app.services.pinecone_service import PineconeConnectionError, PineconeTimeoutError
-from app.services.rag_question_service import (
-    RAGQuestionService,
-    SourceInsufficientContentError,
-    get_rag_question_service,
-)
+from app.services.rag_question_service import RAGQuestionService, get_rag_question_service
 from app.services.session_service import SessionService, get_session_service
-from app.services.source_service import (
-    SourceNotFoundError,
-    SourceNotReadyError,
-    SourceService,
-    get_source_service,
-)
-from app.services.url_service import (
-    ContentTooLargeError,
-    EmptyContentError,
-    InvalidURLError,
-    ProtectedURLError,
-    SSRFSecurityError,
-    UnsupportedContentTypeError,
-    URLFetchError,
-    URLService,
-    get_url_service,
-)
+from app.services.source_service import SourceNotFoundError, SourceService, get_source_service
+from app.services.url_service import URLService, get_url_service
 
 logger = logging.getLogger(__name__)
 
@@ -74,27 +49,10 @@ async def ingest_source_url(
     db: Optional[Session] = Depends(get_db_optional),
 ) -> SourceUploadResponse:
     """Ingest a public URL or GitHub repository as an interview context source."""
-    try:
+    with handle_url_ingestion_errors(
+        unexpected_detail="An unexpected error occurred while processing the source URL."
+    ):
         return await url_service.ingest_url(url=payload.url, db=db)
-    except (InvalidURLError, SSRFSecurityError, UnsupportedContentTypeError, EmptyContentError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except ProtectedURLError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    except ContentTooLargeError as exc:
-        status_413 = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413)
-        raise HTTPException(status_code=status_413, detail=str(exc)) from exc
-    except URLFetchError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Embedding service unavailable: {exc}") from exc
-    except (PineconeConnectionError, PineconeTimeoutError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Pinecone service unavailable: {exc}") from exc
-    except Exception as exc:
-        logger.error("Unexpected error ingesting source URL: %s", exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while processing the source URL.",
-        ) from exc
 
 
 @router.get(
@@ -118,10 +76,7 @@ async def get_source_status(
     try:
         return source_service.get_source(clean_id, db=db)
     except SourceNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get(
@@ -170,26 +125,10 @@ async def generate_source_questions(
     if req.source_id != clean_id:
         req = req.model_copy(update={"source_id": clean_id})
 
-    try:
+    with handle_rag_question_errors(
+        unexpected_detail="An unexpected internal error occurred while generating source interview questions."
+    ):
         return await rag_service.generate_source_questions(req, db=db)
-    except SourceNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (SourceNotReadyError, SourceInsufficientContentError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Embedding service unavailable: {exc}") from exc
-    except (PineconeConnectionError, PineconeTimeoutError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Pinecone service unavailable: {exc}") from exc
-    except (OllamaConnectionError, OllamaTimeoutError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"AI model service unavailable: {exc}") from exc
-    except OllamaResponseError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.error("Unexpected error generating questions for source '%s': %s", clean_id, exc, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected internal error occurred while generating source interview questions.",
-        ) from exc
 
 
 @router.post(
@@ -223,7 +162,9 @@ async def create_source_session(
                     detail=f"Source '{payload.source_id}' is not ready (status: {source.status}).",
                 )
         except SourceNotFoundError:
-            logger.info("Source ID '%s' not registered in database; proceeding with session creation.", payload.source_id)
+            logger.info(
+                "Source ID '%s' not registered in database; proceeding with session creation.",
+                payload.source_id,
+            )
 
     return session_service.create_session(payload, db=db)
-

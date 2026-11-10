@@ -1,3 +1,5 @@
+"""Health check API routes for backend, Ollama LLM, and PostgreSQL database."""
+
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
@@ -9,10 +11,6 @@ from app.schemas.health import (
     HealthCheckResponse,
     OllamaHealthResponse,
 )
-
-
-
-
 from app.services.ollama_service import (
     OllamaConnectionError,
     OllamaResponseError,
@@ -20,6 +18,8 @@ from app.services.ollama_service import (
     OllamaTimeoutError,
     get_ollama_service,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/health", tags=["Health"])
 
@@ -93,8 +93,6 @@ async def get_ollama_health(
 )
 async def get_database_health() -> DatabaseHealthResponse:
     """Verify database reachability without exposing secrets."""
-    logger = logging.getLogger(__name__)
-
     if not db_session.is_database_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -105,7 +103,6 @@ async def get_database_health() -> DatabaseHealthResponse:
         engine = db_session.get_engine()
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-
     except Exception as exc:
         logger.error("Database health check failed: %s", type(exc).__name__)
         raise HTTPException(
@@ -119,4 +116,3 @@ async def get_database_health() -> DatabaseHealthResponse:
         database_connected=True,
         database_configured=True,
     )
-
