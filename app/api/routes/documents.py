@@ -4,12 +4,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import require_active_user
 from app.core.exceptions import (
     handle_document_upload_errors,
     handle_rag_question_errors,
     handle_url_ingestion_errors,
 )
 from app.db.session import get_db_optional
+from app.models.auth import User
 from app.schemas.document import (
     DocumentUploadResponse,
     SourceQuestionsRequest,
@@ -21,9 +23,9 @@ from app.schemas.document import (
 from app.schemas.interview import DocumentQuestionRequest, DocumentQuestionResponse
 from app.services.document_service import DocumentService, get_document_service
 from app.services.rag_question_service import RAGQuestionService, get_rag_question_service
-from app.services.source_service import SourceNotFoundError, SourceService, get_source_service
+from app.services.source_service import SourceForbiddenError, SourceNotFoundError, SourceService, get_source_service
 from app.services.url_service import URLService, get_url_service
-from app.utils.identifiers import normalize_document_id
+from app.utils.identifiers import normalize_document_id, supports_kwarg
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -53,11 +55,15 @@ async def upload_document(
     file: UploadFile = File(..., description="Multipart PDF file to upload and extract text from"),
     document_service: DocumentService = Depends(get_document_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> DocumentUploadResponse:
     """Accepts a multipart PDF upload, validates structure, extracts text, chunks, embeds, and stores in Pinecone."""
     try:
         with handle_document_upload_errors():
-            return await document_service.ingest_pdf(file=file, db=db)
+            kwargs = {"file": file, "db": db}
+            if supports_kwarg(document_service.ingest_pdf, "user_id"):
+                kwargs["user_id"] = current_user.id
+            return await document_service.ingest_pdf(**kwargs)
     finally:
         await file.close()
 
@@ -85,12 +91,16 @@ async def ingest_url(
     payload: UrlIngestRequest,
     url_service: URLService = Depends(get_url_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceUploadResponse:
     """Ingest a public URL or GitHub repository, validate SSRF, extract text, chunk, and index."""
     with handle_url_ingestion_errors(
         unexpected_detail="An unexpected error occurred while processing the URL."
     ):
-        return await url_service.ingest_url(url=payload.url, db=db)
+        kwargs = {"url": payload.url, "db": db}
+        if supports_kwarg(url_service.ingest_url, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await url_service.ingest_url(**kwargs)
 
 
 @router.get(
@@ -108,11 +118,14 @@ async def get_document_status(
     document_id: str,
     source_service: SourceService = Depends(get_source_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceStatusResponse:
     """Retrieve indexing status and metadata for a document or source ID."""
     clean_id = (document_id or "").strip()
     try:
-        return source_service.get_source(clean_id, db=db)
+        return source_service.get_source(clean_id, db=db, user_id=current_user.id)
+    except SourceForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except SourceNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -139,6 +152,7 @@ async def generate_questions_for_document(
     payload: Optional[SourceQuestionsRequest] = None,
     rag_service: RAGQuestionService = Depends(get_rag_question_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceQuestionsResponse:
     """Generate multiple structured interview questions grounded in document context."""
     clean_id = normalize_document_id(document_id)
@@ -152,7 +166,10 @@ async def generate_questions_for_document(
     with handle_rag_question_errors(
         unexpected_detail="An unexpected internal error occurred while generating interview questions."
     ):
-        return await rag_service.generate_source_questions(req, db=db)
+        kwargs = {"db": db}
+        if supports_kwarg(rag_service.generate_source_questions, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await rag_service.generate_source_questions(req, **kwargs)
 
 
 @router.post(
@@ -180,6 +197,8 @@ async def generate_question_for_document(
     document_id: str,
     payload: Optional[DocumentQuestionRequest] = None,
     rag_service: RAGQuestionService = Depends(get_rag_question_service),
+    db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> DocumentQuestionResponse:
     """Convenience endpoint generating a single grounded question for a specific path document_id."""
     clean_id = normalize_document_id(document_id)
@@ -197,4 +216,9 @@ async def generate_question_for_document(
         unexpected_detail="An unexpected internal error occurred while generating the document question.",
         detailed_service_messages=True,
     ):
-        return await rag_service.generate_document_question(req)
+        kwargs = {}
+        if supports_kwarg(rag_service.generate_document_question, "db"):
+            kwargs["db"] = db
+        if supports_kwarg(rag_service.generate_document_question, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await rag_service.generate_document_question(req, **kwargs)

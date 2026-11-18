@@ -227,12 +227,31 @@ class RepoQuestionService:
             logger.error("Failed to decode JSON from Ollama for repository question: %s", raw_output)
             raise
 
+        question_text = str(parsed.get("question") or "").strip()
+        if len(question_text) < 5:
+            raise OllamaResponseError("Local AI model returned an empty or invalid repository question.")
+
+        raw_pts = parsed.get("expected_answer_points", [])
+        if isinstance(raw_pts, str):
+            raw_pts = [raw_pts]
+        elif not isinstance(raw_pts, list):
+            raw_pts = []
+        cleaned_pts = [str(p).strip() for p in raw_pts if str(p).strip()]
+        if not cleaned_pts:
+            cleaned_pts = ["Explain the architecture, design choices, and trade-offs in this repository."]
+
+        follow_up = str(parsed.get("follow_up_question") or "").strip()
+        if len(follow_up) < 5:
+            follow_up = "What edge cases or scaling bottlenecks would you address next in this implementation?"
+
+        resolved_topic = str(parsed.get("topic") or "").strip() or target_topic
+
         return RepoQuestionResponse(
-            question=parsed.get("question", ""),
-            expected_answer_points=parsed.get("expected_answer_points", []),
-            follow_up_question=parsed.get("follow_up_question", ""),
+            question=question_text,
+            expected_answer_points=cleaned_pts,
+            follow_up_question=follow_up,
             difficulty=payload.difficulty,
-            topic=str(parsed.get("topic", target_topic)),
+            topic=resolved_topic,
             repository=full_repo_name,
             context_grounded=context_grounded,
             evidence=evidence,

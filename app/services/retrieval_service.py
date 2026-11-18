@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Depends
 
 from app.core.config import settings
-from app.utils.identifiers import normalize_document_id
+from app.utils.identifiers import normalize_document_id, supports_kwarg
 from app.services.embedding_service import (
     EmbeddingConnectionError,
     EmbeddingService,
@@ -137,6 +137,8 @@ class RetrievalService:
         top_k: int = 4,
         namespace: Optional[str] = None,
         min_score: Optional[float] = None,
+        user_id: Optional[str] = None,
+        filter_dict: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
         """Retrieves semantically relevant chunks for a query, isolated to a specific document and filtered by threshold.
 
@@ -186,13 +188,18 @@ class RetrievalService:
         # 2. Generate dense query embedding vector (768 dimensions)
         query_vector = await self.embedding_service.embed_text(clean_query)
 
-        # 3. Query Pinecone with document-scoped isolation filter
-        raw_matches = await self.pinecone_service.query_similar_chunks(
-            query_vector=query_vector,
-            document_id=clean_doc_id,
-            top_k=top_k,
-            namespace=namespace,
-        )
+        # 3. Query Pinecone with document-scoped and user-scoped isolation filter
+        query_kwargs: Dict[str, Any] = {
+            "query_vector": query_vector,
+            "document_id": clean_doc_id,
+            "top_k": top_k,
+            "namespace": namespace,
+        }
+        if user_id and supports_kwarg(self.pinecone_service.query_similar_chunks, "user_id"):
+            query_kwargs["user_id"] = user_id
+        if filter_dict and supports_kwarg(self.pinecone_service.query_similar_chunks, "filter_dict"):
+            query_kwargs["filter_dict"] = filter_dict
+        raw_matches = await self.pinecone_service.query_similar_chunks(**query_kwargs)
 
         if not raw_matches:
             logger.info("No matching chunks retrieved for document '%s'.", clean_doc_id)

@@ -242,7 +242,7 @@ def test_validate_repository_timeout_and_connection_error():
         resp = client.post("/api/v1/github/validate", json={"repo_url_or_name": "slow/repo"})
         assert resp.status_code == 504
     finally:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_github_service, None)
 
     class MockConnGitHub(GitHubMCPService):
         async def get_repository_metadata(self, owner_or_url, repo=None):
@@ -992,5 +992,233 @@ async def test_mcp_tool_error_flag_raises_file_not_found():
     service = GitHubMCPService(session_factory=mock_session_factory)
     with pytest.raises(GitHubFileNotFoundError):
         await service.get_file_content("octocat/Hello-World", "README.md")
+
+
+@pytest.mark.anyio
+async def test_mcp_session_scope_reuses_single_session():
+    """Verify session_scope enters session_factory once across multiple MCP calls."""
+    from contextlib import asynccontextmanager
+
+    mock_session = AsyncMock()
+    tools_result = AsyncMock()
+    tools_result.tools = [DummyTool("get_file_contents", "Get contents")]
+    mock_session.list_tools.return_value = tools_result
+
+    async def mock_call_tool(tool_name, arguments):
+        path = arguments.get("path", "")
+        if path == "":
+            return DummyCallToolResult(json.dumps([{"name": "app.py", "path": "app.py", "type": "file", "size": 10}]))
+        return DummyCallToolResult(json.dumps({"content": "cHJpbnQoMSk=", "encoding": "base64", "size": 8}))
+
+    mock_session.call_tool.side_effect = mock_call_tool
+    factory_entries = 0
+
+    @asynccontextmanager
+    async def mock_session_factory():
+        nonlocal factory_entries
+        factory_entries += 1
+        yield mock_session
+
+    service = GitHubMCPService(session_factory=mock_session_factory)
+    async with service.session_scope():
+        await service.list_files("octocat/Hello-World", path="")
+        await service.get_file_content("octocat/Hello-World", "app.py")
+
+    assert factory_entries == 1
+
+
+@pytest.mark.anyio
+async def test_mcp_empty_file_text_resource_validation_error():
+    """Verify omitted TextResourceContents.text on 0-byte files returns empty content instead of failing."""
+    from contextlib import asynccontextmanager
+    from pydantic import ValidationError
+
+    mock_session = AsyncMock()
+    tools_result = AsyncMock()
+    tools_result.tools = [DummyTool("get_file_contents", "Get contents")]
+    mock_session.list_tools.return_value = tools_result
+
+    async def mock_call_tool(tool_name, arguments):
+        raise ValidationError.from_exception_data(
+            "CallToolResult",
+            [
+                {
+                    "type": "missing",
+                    "loc": ("content", 1, "EmbeddedResource", "resource", "TextResourceContents", "text"),
+                    "input": {"uri": "repo://o/r/contents/__init__.py"},
+                }
+            ],
+        )
+
+    mock_session.call_tool.side_effect = mock_call_tool
+
+    @asynccontextmanager
+    async def mock_session_factory():
+        yield mock_session
+
+    service = GitHubMCPService(session_factory=mock_session_factory)
+    file_resp = await service.get_file_content("octocat/Hello-World", "pkg/__init__.py")
+    assert file_resp.size_bytes == 0
+    assert file_resp.content == ""
+
+
+@pytest.mark.anyio
+async def test_mcp_get_repository_metadata_none_fields_and_fork_fallback():
+    """Verify None metadata fields use safe defaults and fork:true fallback finds forked repos."""
+    from contextlib import asynccontextmanager
+
+    mock_session = AsyncMock()
+    tools_result = AsyncMock()
+    tools_result.tools = [
+        DummyTool("search_repositories", "Search repos"),
+        DummyTool("get_file_contents", "Get contents"),
+    ]
+    mock_session.list_tools.return_value = tools_result
+    queries_seen = []
+
+    async def mock_call_tool(tool_name, arguments):
+        if tool_name == "search_repositories":
+            queries_seen.append(arguments["query"])
+            if "fork:true" not in arguments["query"]:
+                return DummyCallToolResult(json.dumps({"items": []}))
+            return DummyCallToolResult(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "name": None,
+                                "full_name": "octocat/forked-app",
+                                "default_branch": None,
+                                "html_url": None,
+                                "owner": None,
+                            }
+                        ]
+                    }
+                )
+            )
+        return DummyCallToolResult(json.dumps([]))
+
+    mock_session.call_tool.side_effect = mock_call_tool
+
+    @asynccontextmanager
+    async def mock_session_factory():
+        yield mock_session
+
+    service = GitHubMCPService(session_factory=mock_session_factory)
+    meta = await service.get_repository_metadata("octocat/forked-app")
+    assert meta.owner == "octocat"
+    assert meta.repo == "forked-app"
+    assert meta.default_branch == "main"
+    assert meta.html_url == "https://github.com/octocat/forked-app"
+    assert len(queries_seen) == 2
+    assert "fork:true" in queries_seen[1]
+
+
+@pytest.mark.anyio
+async def test_private_repo_accessible_via_contents_fallback_when_search_misses():
+    """Private repo omitted by search_repositories still succeeds when get_file_contents is authorized."""
+    from contextlib import asynccontextmanager
+
+    mock_session = AsyncMock()
+    tools_result = AsyncMock()
+    tools_result.tools = [
+        DummyTool("search_repositories", "Search repos"),
+        DummyTool("get_file_contents", "Get contents"),
+    ]
+    mock_session.list_tools.return_value = tools_result
+
+    async def mock_call_tool(tool_name, arguments):
+        if tool_name == "search_repositories":
+            return DummyCallToolResult(
+                "The listed users and repositories cannot be searched either because the resources do not exist or you do not have permission to view them.",
+                is_error=True,
+            )
+        if tool_name == "get_file_contents":
+            return DummyCallToolResult(
+                json.dumps([{"name": "README.md", "path": "README.md", "type": "file", "size": 120}])
+            )
+        raise ValueError(f"Unexpected tool: {tool_name}")
+
+    mock_session.call_tool.side_effect = mock_call_tool
+
+    @asynccontextmanager
+    async def mock_session_factory():
+        yield mock_session
+
+    service = GitHubMCPService(token="github_pat_authorized_dummy", session_factory=mock_session_factory)
+    meta = await service.get_repository_metadata("Innovatech-Technology-Solutions/doe-phase2-app")
+    assert meta.owner == "Innovatech-Technology-Solutions"
+    assert meta.repo == "doe-phase2-app"
+    assert meta.is_private is True
+    assert meta.has_readme is True
+
+
+@pytest.mark.anyio
+async def test_private_repo_403_not_masked_as_404():
+    """If search_repositories cannot find a private repo and get_file_contents returns 403, raise GitHubPermissionError."""
+    from contextlib import asynccontextmanager
+
+    mock_session = AsyncMock()
+    tools_result = AsyncMock()
+    tools_result.tools = [
+        DummyTool("search_repositories", "Search repos"),
+        DummyTool("get_file_contents", "Get contents"),
+    ]
+    mock_session.list_tools.return_value = tools_result
+
+    async def mock_call_tool(tool_name, arguments):
+        if tool_name == "search_repositories":
+            return DummyCallToolResult(json.dumps({"items": []}))
+        if tool_name == "get_file_contents":
+            return DummyCallToolResult("403 Resource not accessible by personal access token", is_error=True)
+        raise ValueError(f"Unexpected tool: {tool_name}")
+
+    mock_session.call_tool.side_effect = mock_call_tool
+
+    @asynccontextmanager
+    async def mock_session_factory():
+        yield mock_session
+
+    service = GitHubMCPService(token="github_pat_limited_dummy", session_factory=mock_session_factory)
+    with pytest.raises(GitHubPermissionError, match="lacks repository read permission"):
+        await service.get_repository_metadata("Innovatech-Technology-Solutions/doe-phase2-app")
+
+
+@pytest.mark.anyio
+async def test_mcp_error_mappings_sso_invalid_token_and_nonexistent():
+    """Verify SSO, 401 invalid token, 403 permission, and 404 nonexistent repo mappings."""
+    from mcp.shared.exceptions import MCPError
+
+    service = GitHubMCPService()
+
+    with pytest.raises(GitHubPermissionError, match="SAML/SSO"):
+        service._handle_mcp_error(MCPError(code=-1, message="Resource protected by organization SAML enforcement (SSO)"))
+
+    with pytest.raises(GitHubPermissionError, match="invalid, expired"):
+        service._handle_mcp_error(MCPError(code=-1, message="401 Bad credentials"))
+
+    with pytest.raises(GitHubPermissionError, match="lacks repository read permission"):
+        service._handle_mcp_error(MCPError(code=-1, message="403 Forbidden: insufficient scope"))
+
+    with pytest.raises(GitHubRepoNotFoundError, match="Repository does not exist or is inaccessible"):
+        service._handle_mcp_error(MCPError(code=-1, message="404 Not Found"), is_file_request=False)
+
+
+def test_missing_github_token_and_subprocess_env(monkeypatch):
+    """Verify missing token is omitted from MCP subprocess env and missing binary raises GitHubConnectionError."""
+    service = GitHubMCPService(token=None, server_command="nonexistent-mcp-binary-xyz")
+    params = service._resolve_server_params()
+    assert "GITHUB_TOKEN" not in params.env
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in params.env
+    assert params.command == "nonexistent-mcp-binary-xyz"
+
+
+@pytest.mark.anyio
+async def test_incorrect_mcp_subprocess_raises_connection_error():
+    """Verify launching a missing MCP binary raises GitHubConnectionError cleanly."""
+    service = GitHubMCPService(token=None, server_command="nonexistent-mcp-binary-xyz")
+    with pytest.raises(GitHubConnectionError, match="Failed to connect to GitHub MCP server"):
+        await service.get_repository_metadata("fastapi/fastapi")
+
 
 

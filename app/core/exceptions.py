@@ -10,7 +10,9 @@ import logging
 from typing import Iterator, Optional
 from fastapi import HTTPException, status
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
+from app.db.session import DatabaseError
 from app.services.answer_evaluation_service import EvaluationOutputFormatError
 from app.services.embedding_service import (
     EmbeddingConnectionError,
@@ -30,6 +32,7 @@ from app.services.github_mcp_service import (
 )
 from app.services.ollama_service import (
     OllamaConnectionError,
+    OllamaModelNotFoundError,
     OllamaResponseError,
     OllamaTimeoutError,
 )
@@ -49,11 +52,17 @@ from app.services.pinecone_service import (
     PineconeResponseError,
     PineconeTimeoutError,
 )
+from app.services.project_explainer_service import (
+    ProjectAnalysisForbiddenError,
+    ProjectAnalysisNotFoundError,
+    ProjectAnalysisNotReadyError,
+)
 from app.services.question_generation_service import QuestionOutputFormatError
 from app.services.rag_question_service import SourceInsufficientContentError
+from app.services.repo_ingestion_service import EmptyRepositoryError
 from app.services.retrieval_service import EmptyQueryError, InvalidDocumentIdError
-from app.services.session_service import SessionNotFoundError, SessionStateError
-from app.services.source_service import SourceNotFoundError, SourceNotReadyError
+from app.services.session_service import SessionForbiddenError, SessionNotFoundError, SessionStateError
+from app.services.source_service import SourceForbiddenError, SourceNotFoundError, SourceNotReadyError
 from app.services.url_service import (
     ContentTooLargeError,
     EmptyContentError,
@@ -80,6 +89,11 @@ def handle_github_errors(
         yield
     except HTTPException:
         raise
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The AI model returned data that does not match the required question format.",
+        ) from exc
     except (ValueError, GitHubValidationError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except GitHubFileTooLargeError as exc:
@@ -95,7 +109,7 @@ def handle_github_errors(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except GitHubRateLimitError as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
-    except (OllamaConnectionError, GitHubConnectionError) as exc:
+    except (OllamaConnectionError, OllamaModelNotFoundError, GitHubConnectionError) as exc:
         detail = f"Service unavailable: {exc}" if wrap_generation_messages else str(exc)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
     except (OllamaTimeoutError, GitHubTimeoutError) as exc:
@@ -125,7 +139,7 @@ def handle_url_ingestion_errors(
     """Translate URL ingestion, SSRF, embedding, and Pinecone exceptions into HTTPExceptions."""
     try:
         yield
-    except HTTPException:
+    except (HTTPException, DatabaseError, SQLAlchemyError):
         raise
     except (
         InvalidURLError,
@@ -141,6 +155,20 @@ def handle_url_ingestion_errors(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except ContentTooLargeError as exc:
         raise HTTPException(status_code=HTTP_413_STATUS, detail=str(exc)) from exc
+    except (ValueError, GitHubValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (GitHubRepoNotFoundError, GitHubFileNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except GitHubPermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except GitHubRateLimitError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except GitHubTimeoutError as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
+    except GitHubConnectionError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GitHubServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except (EmbeddingConnectionError, EmbeddingTimeoutError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -164,7 +192,7 @@ def handle_document_upload_errors() -> Iterator[None]:
     """Translate PDF upload, embedding, and Pinecone exceptions into HTTPExceptions."""
     try:
         yield
-    except HTTPException:
+    except (HTTPException, DatabaseError, SQLAlchemyError):
         raise
     except PDFSizeLimitError as exc:
         logger.warning("Upload size limit exceeded: %s", exc)
@@ -216,10 +244,12 @@ def handle_rag_question_errors(
     """Translate RAG retrieval, source readiness, Pinecone, and Ollama errors into HTTPExceptions."""
     try:
         yield
-    except HTTPException:
+    except (HTTPException, DatabaseError, SQLAlchemyError):
         raise
     except SourceNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SourceForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except (
         SourceNotReadyError,
         SourceInsufficientContentError,
@@ -288,6 +318,8 @@ def handle_session_errors() -> Iterator[None]:
         yield
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except SessionForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except SessionStateError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -301,7 +333,7 @@ def handle_interview_ai_errors(
     """Translate Ollama connection, timeout, response, and output format errors into HTTPExceptions."""
     try:
         yield
-    except HTTPException:
+    except (HTTPException, DatabaseError, SQLAlchemyError):
         raise
     except (OllamaConnectionError, OllamaTimeoutError) as exc:
         logger.error("Ollama service unavailable during %s: %s", operation, exc)
@@ -322,5 +354,53 @@ def handle_interview_ai_errors(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while processing the request.",
+        ) from exc
+
+
+@contextmanager
+def handle_project_explainer_errors() -> Iterator[None]:
+    """Translate Project Explainer, GitHub MCP, Embedding, Pinecone, and Ollama errors into HTTPExceptions."""
+    try:
+        yield
+    except (HTTPException, DatabaseError, SQLAlchemyError):
+        raise
+    except ProjectAnalysisNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ProjectAnalysisForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except ProjectAnalysisNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (ValueError, EmptyRepositoryError, GitHubValidationError, InvalidDocumentIdError, EmptyQueryError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except GitHubFileTooLargeError as exc:
+        raise HTTPException(status_code=HTTP_413_STATUS, detail=str(exc)) from exc
+    except (GitHubRepoNotFoundError, GitHubFileNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except GitHubPermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except GitHubRateLimitError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except (GitHubTimeoutError, EmbeddingTimeoutError, PineconeTimeoutError, OllamaTimeoutError) as exc:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=str(exc)) from exc
+    except (GitHubConnectionError, EmbeddingConnectionError, PineconeConnectionError, OllamaConnectionError, OllamaModelNotFoundError) as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except (
+        PineconeConfigurationError,
+        PineconeIndexNotFoundError,
+        PineconeDimensionMismatchError,
+        PineconeResponseError,
+        EmbeddingServiceError,
+    ) as exc:
+        logger.error("Vector/embedding error in Project Explainer: %s", exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    except (OllamaResponseError, ValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except GitHubServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Unexpected error in Project Explainer endpoint: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected internal error occurred while analyzing the project.",
         ) from exc
 

@@ -501,3 +501,25 @@ async def test_pinecone_delete_document_normalizes_chunk_id(mock_pinecone_servic
         namespace="default",
     )
 
+
+@pytest.mark.anyio
+async def test_pinecone_verify_index_allows_standard_dense_vector_schema(mock_pinecone_service: PineconeService):
+    """Standard serverless dense indexes with _values/_sparse_values schema fields pass verification."""
+    mock_pinecone_service._client.has_index.return_value = True
+    mock_pinecone_service._client.describe_index.return_value = {
+        "dimension": 768,
+        "metric": "cosine",
+        "embed": None,
+        "schema": {
+            "fields": {
+                "_values": {"type": "dense_vector", "dimension": 768, "metric": "cosine"},
+                "_sparse_values": {"type": "sparse_vector"},
+            }
+        },
+    }
+
+    result = await mock_pinecone_service.verify_index()
+    assert result["status"] == "ready"
+    assert result["dimension"] == 768
+    assert result["metric"] == "cosine"
+

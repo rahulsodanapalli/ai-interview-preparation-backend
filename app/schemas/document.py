@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, List, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.interview import (
     DifficultyLevel,
@@ -263,8 +263,7 @@ class SourceQuestionsRequest(BaseModel):
     )
     topic: Optional[str] = Field(
         default=None,
-        min_length=2,
-        max_length=100,
+        max_length=255,
         description="Optional technical topic focus area",
     )
     question_type: QuestionType = Field(
@@ -281,6 +280,21 @@ class SourceQuestionsRequest(BaseModel):
         default=False,
         description="Whether to bypass cached questions and regenerate new ones",
     )
+
+    @model_validator(mode="after")
+    def normalize_topic_length(self) -> "SourceQuestionsRequest":
+        """Normalize source-derived topics exceeding 100 chars or shorter than 2 chars."""
+        if self.topic is not None:
+            cleaned = self.topic.strip()
+            if not cleaned:
+                self.topic = None
+            elif len(cleaned) < 2 and self.source_id:
+                self.topic = None
+            elif len(cleaned) < 2:
+                raise ValueError("'topic' must be at least 2 characters long.")
+            elif len(cleaned) > 100:
+                self.topic = cleaned[:100].strip()
+        return self
 
 
 class SourceQuestionsResponse(BaseModel):

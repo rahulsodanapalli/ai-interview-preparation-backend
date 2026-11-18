@@ -21,6 +21,7 @@ from app.services.github_mcp_service import GitHubMCPService, get_github_service
 from app.services.pinecone_service import PineconeService, get_pinecone_service
 from app.services.source_service import SourceService, get_source_service
 from app.utils.html_parser import HTMLTextExtractor
+from app.utils.identifiers import supports_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +370,7 @@ class URLService:
         self,
         url: str,
         db=None,
+        user_id: Optional[str] = None,
     ) -> SourceUploadResponse:
         """
         Validates URL, checks SSRF, extracts content (reusing GitHub MCP if GitHub repo),
@@ -392,7 +394,7 @@ class URLService:
 
         preview = " ".join(readable_text.split())[:500]
 
-        # Register source in store / database
+        # Register source in PostgreSQL immediately so status survives downstream failures.
         self.source_service.register_source(
             source_id=source_id,
             source_type=source_type,
@@ -401,24 +403,33 @@ class URLService:
             status=SourceProcessingStatus.PROCESSING,
             character_count=char_count,
             db=db,
+            commit_immediately=True,
+            user_id=user_id,
         )
 
+        vector_upsert_started = False
         try:
             # Chunk the extracted text
             chunks = self.chunking_service.create_chunks(readable_text)
             chunk_count = len(chunks)
+            if chunk_count == 0:
+                raise EmptyContentError("No indexable text chunks could be created from the URL content.")
 
             # Generate embeddings via Ollama
             chunk_texts = [c.text for c in chunks]
             vectors = await self.embedding_service.embed_chunks(chunk_texts)
 
-            # Store in Pinecone with source isolation metadata
-            vector_count = await self.pinecone_service.upsert_document_chunks(
-                document_id=source_id,
-                chunks=chunks,
-                vectors=vectors,
-                filename=title,
-            )
+            # Store in Pinecone with source and user isolation metadata
+            upsert_kwargs = {
+                "document_id": source_id,
+                "chunks": chunks,
+                "vectors": vectors,
+                "filename": title,
+            }
+            if user_id and supports_kwarg(self.pinecone_service.upsert_document_chunks, "user_id"):
+                upsert_kwargs["user_id"] = user_id
+            vector_upsert_started = True
+            vector_count = await self.pinecone_service.upsert_document_chunks(**upsert_kwargs)
 
             # Update status to completed
             self.source_service.update_source(
@@ -454,11 +465,23 @@ class URLService:
             )
 
         except Exception as exc:
-            self.source_service.update_source(
+            if vector_upsert_started:
+                try:
+                    delete_kwargs = {"document_id": source_id}
+                    if user_id and supports_kwarg(self.pinecone_service.delete_document, "user_id"):
+                        delete_kwargs["user_id"] = user_id
+                    await self.pinecone_service.delete_document(**delete_kwargs)
+                except Exception as cleanup_exc:
+                    logger.warning("Failed to clean up Pinecone vectors for %s: %s", source_id, cleanup_exc)
+            self.source_service.mark_source_failed(
                 source_id=source_id,
-                status=SourceProcessingStatus.FAILED,
                 error_message=str(exc),
                 db=db,
+                source_type=source_type,
+                title=title,
+                url=canonical_url,
+                character_count=char_count,
+                user_id=user_id,
             )
             raise
 

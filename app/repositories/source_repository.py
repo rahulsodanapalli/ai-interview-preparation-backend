@@ -15,8 +15,8 @@ def _safe_rollback(db: Session) -> None:
     """Attempt a rollback on a failed database operation without masking the original error."""
     try:
         db.rollback()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Failed to roll back database session: %s", type(exc).__name__)
 
 
 class SourceRepository:
@@ -36,11 +36,13 @@ class SourceRepository:
         chunk_count: int,
         vector_count: int,
         error_message: Optional[str],
-    ) -> None:
+        user_id: Optional[str] = None,
+    ) -> DocumentSource:
         """Persist a new DocumentSource record."""
         try:
             db_source = DocumentSource(
                 id=source_id,
+                user_id=user_id,
                 source_type=source_type,
                 title=title[:255],
                 url=url,
@@ -54,9 +56,11 @@ class SourceRepository:
             db.add(db_source)
             db.flush()
             logger.info("Persisted source record '%s' to database.", source_id)
+            return db_source
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning("Failed to persist source '%s' to database: %s", source_id, exc)
+            logger.error("Failed to persist source '%s' to database: %s", source_id, type(exc).__name__)
+            raise
 
     def update(
         self,
@@ -68,51 +72,53 @@ class SourceRepository:
         chunk_count: Optional[int] = None,
         vector_count: Optional[int] = None,
         error_message: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[DocumentSource]:
         """Update metrics and status for an existing DocumentSource record."""
         try:
             src_db = db.get(DocumentSource, source_id)
-            if src_db:
-                if status is not None:
-                    src_db.status = status
-                if character_count is not None:
-                    src_db.character_count = character_count
-                if chunk_count is not None:
-                    src_db.chunk_count = chunk_count
-                if vector_count is not None:
-                    src_db.vector_count = vector_count
-                if error_message is not None:
-                    src_db.error_message = error_message
-                db.flush()
+            if src_db is None:
+                return None
+            if status is not None:
+                src_db.status = status
+            if character_count is not None:
+                src_db.character_count = character_count
+            if chunk_count is not None:
+                src_db.chunk_count = chunk_count
+            if vector_count is not None:
+                src_db.vector_count = vector_count
+            if error_message is not None:
+                src_db.error_message = error_message
+            db.flush()
+            return src_db
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning("Failed to update database source '%s': %s", source_id, exc)
+            logger.error("Failed to update database source '%s': %s", source_id, type(exc).__name__)
+            raise
 
     def get_by_id(self, db: Session, source_id: str) -> Optional[DocumentSource]:
-        """Retrieve a DocumentSource by its ID, or None if missing/failed."""
+        """Retrieve a DocumentSource by its ID, or None if not found."""
         try:
             return db.get(DocumentSource, source_id)
         except Exception as exc:
-            logger.debug("Database lookup for source '%s' failed: %s", source_id, exc)
-            return None
+            logger.error("Database lookup for source '%s' failed: %s", source_id, type(exc).__name__)
+            raise
 
     def list_recent(
         self,
         db: Session,
         *,
+        user_id: Optional[str] = None,
         limit: int = 50,
         skip: int = 0,
-    ) -> Optional[List[DocumentSource]]:
-        """List DocumentSource records ordered by creation timestamp descending."""
+    ) -> List[DocumentSource]:
+        """List DocumentSource records ordered by creation timestamp descending, scoped by user_id."""
         try:
-            stmt = (
-                select(DocumentSource)
-                .order_by(DocumentSource.created_at.desc())
-                .offset(skip)
-                .limit(limit)
-            )
+            stmt = select(DocumentSource)
+            if user_id is not None:
+                stmt = stmt.where(DocumentSource.user_id == user_id)
+            stmt = stmt.order_by(DocumentSource.created_at.desc()).offset(skip).limit(limit)
             return list(db.execute(stmt).scalars().all())
         except Exception as exc:
-            logger.warning("Failed to list sources from database: %s", exc)
-            return None
+            logger.error("Failed to list sources from database: %s", type(exc).__name__)
+            raise
 

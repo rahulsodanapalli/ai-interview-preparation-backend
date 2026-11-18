@@ -1,25 +1,37 @@
 from app.db.base import Base
 from app.db.session import (
     DatabaseConfigurationError,
+    DatabaseConnectionError,
+    DatabaseError,
+    DatabasePersistenceError,
+    dispose_engine,
     get_db,
     get_db_optional,
     get_engine,
     get_session_factory,
     is_database_configured,
+    is_production_env,
     mask_database_url,
     normalize_database_url,
     reset_engine,
+    validate_database_configuration,
 )
 
 __all__ = [
     "Base",
     "DatabaseConfigurationError",
+    "DatabaseConnectionError",
+    "DatabaseError",
+    "DatabasePersistenceError",
+    "dispose_engine",
     "get_db",
     "get_db_optional",
     "get_engine",
     "get_session_factory",
     "is_database_configured",
+    "is_production_env",
     "mask_database_url",
     "normalize_database_url",
     "reset_engine",
+    "validate_database_configuration",
 ]

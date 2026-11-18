@@ -1,6 +1,5 @@
 """Interview Answer Evaluation Service using local Ollama LLM."""
 
-import json
 import logging
 from typing import Optional
 from fastapi import Depends
@@ -8,7 +7,7 @@ from pydantic import ValidationError
 
 from app.schemas.interview import InterviewEvaluationRequest, InterviewEvaluationResponse
 from app.services.ollama_service import OllamaResponseError, OllamaService, get_ollama_service
-from app.utils.json_parser import strip_markdown_fences
+from app.utils.json_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +33,21 @@ class AnswerEvaluationService:
             candidate_answer=payload.candidate_answer,
         )
 
-        cleaned_output = strip_markdown_fences(raw_output)
-
-        try:
-            parsed_data = json.loads(cleaned_output)
-        except json.JSONDecodeError as exc:
-            logger.error("Failed to decode JSON from AI evaluation response: %s", raw_output)
-            raise EvaluationOutputFormatError("The AI model returned an invalid JSON response.") from exc
-
-        if not isinstance(parsed_data, dict):
-            logger.error("AI evaluation response was not a JSON dictionary: %s", parsed_data)
-            raise EvaluationOutputFormatError("The AI model returned an unexpected JSON structure.")
+        parsed_data = parse_llm_json(
+            raw_output,
+            error_cls=EvaluationOutputFormatError,
+            decode_error_message="The AI model returned an invalid JSON response.",
+            type_error_message="The AI model returned an unexpected JSON structure.",
+        )
 
         for list_field in ("correct_points", "missing_points", "strengths", "improvements"):
-            if list_field not in parsed_data or parsed_data[list_field] is None:
+            val = parsed_data.get(list_field)
+            if val is None:
                 parsed_data[list_field] = []
+            elif isinstance(val, str):
+                parsed_data[list_field] = [val.strip()] if val.strip() else []
+            elif isinstance(val, list):
+                parsed_data[list_field] = [str(item).strip() for item in val if str(item).strip()]
 
         try:
             return InterviewEvaluationResponse.model_validate(parsed_data)

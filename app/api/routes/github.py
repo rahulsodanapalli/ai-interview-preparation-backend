@@ -3,7 +3,9 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query, status
 
+from app.api.dependencies.auth import require_active_user
 from app.core.exceptions import handle_github_errors
+from app.models.auth import User
 from app.schemas.github import (
     RepoFileContentResponse,
     RepoFileRequest,
@@ -39,6 +41,7 @@ router = APIRouter(prefix="/github", tags=["GitHub MCP"])
 async def validate_repository(
     payload: RepoIdentifierRequest,
     github_service: GitHubMCPService = Depends(get_github_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RepoMetadataResponse:
     """Validate repository identifier and retrieve metadata."""
     with handle_github_errors():
@@ -65,6 +68,7 @@ async def get_repository_readme(
     repo: str = Query(..., description="Repository identifier ('owner/repo' or URL)"),
     ref: Optional[str] = Query(None, description="Optional Git branch, tag, or commit SHA"),
     github_service: GitHubMCPService = Depends(get_github_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RepoReadmeResponse:
     """Fetch repository README content."""
     with handle_github_errors(
@@ -94,6 +98,7 @@ async def list_repository_files(
     path: str = Query("", description="Relative path within the repository (default root)"),
     ref: Optional[str] = Query(None, description="Optional Git branch, tag, or commit SHA"),
     github_service: GitHubMCPService = Depends(get_github_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RepoFilesListResponse:
     """List repository files and subdirectories."""
     with handle_github_errors():
@@ -120,6 +125,7 @@ async def list_repository_files(
 async def get_file_content(
     payload: RepoFileRequest,
     github_service: GitHubMCPService = Depends(get_github_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RepoFileContentResponse:
     """Fetch content of a source file."""
     with handle_github_errors():
@@ -153,6 +159,7 @@ async def get_file_content(
 async def generate_repo_question(
     payload: RepoQuestionRequest,
     repo_question_service: RepoQuestionService = Depends(get_repo_question_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RepoQuestionResponse:
     """Generate interview question grounded in repository source code or README."""
     with handle_github_errors(wrap_generation_messages=True):

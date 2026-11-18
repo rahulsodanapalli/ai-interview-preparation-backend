@@ -24,6 +24,29 @@ from app.utils.identifiers import normalize_document_id
 
 logger = logging.getLogger(__name__)
 
+_STANDARD_VECTOR_SCHEMA_FIELDS = frozenset({"_values", "_sparse_values"})
+_VECTOR_FIELD_TYPES = frozenset({"dense_vector", "sparse_vector"})
+
+
+def _is_document_index_schema(*, schema: Any, embed_cfg: Any) -> bool:
+    """Return True if index metadata indicates an integrated-embedding/document schema."""
+    if embed_cfg:
+        return True
+    if not schema:
+        return False
+
+    fields = getattr(schema, "fields", None) or (schema.get("fields") if isinstance(schema, dict) else None)
+    if not isinstance(fields, dict) or not fields:
+        return True
+
+    for field_name, field_spec in fields.items():
+        if field_name in _STANDARD_VECTOR_SCHEMA_FIELDS:
+            continue
+        field_type = getattr(field_spec, "type", None) or (field_spec.get("type") if isinstance(field_spec, dict) else None)
+        if field_type not in _VECTOR_FIELD_TYPES:
+            return True
+    return False
+
 
 # ============================================================================
 # Pinecone Custom Exceptions
@@ -190,9 +213,12 @@ class PineconeService:
                         f"but embedding model requires dimension {self.dimension}."
                     )
 
-                # Check if this index was configured as a document index with integrated embedding
+                # Check if this index was configured as a document index with integrated embedding.
+                # Standard Pinecone serverless dense indexes may include a schema containing only
+                # built-in vector fields (_values / _sparse_values) and no embed configuration.
+                embed_cfg = getattr(desc, "embed", None) or (desc.get("embed") if isinstance(desc, dict) else None)
                 schema = getattr(desc, "schema", None) or (desc.get("schema") if isinstance(desc, dict) else None)
-                if schema:
+                if _is_document_index_schema(schema=schema, embed_cfg=embed_cfg):
                     raise PineconeDimensionMismatchError(
                         f"Pinecone index '{self.index_name}' is configured as a document index with schema fields, "
                         f"not a standard dense-vector index. "
@@ -221,6 +247,8 @@ class PineconeService:
         filename: str,
         namespace: Optional[str] = None,
         batch_size: int = 100,
+        user_id: Optional[str] = None,
+        extra_metadata_list: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """Upserts text chunks and 768-dim embedding vectors into Pinecone standard dense index.
 
@@ -260,6 +288,10 @@ class PineconeService:
             raise PineconeResponseError(
                 f"Mismatch between chunks count ({len(chunks)}) and vectors count ({len(vectors)})."
             )
+        if extra_metadata_list is not None and len(extra_metadata_list) != len(chunks):
+            raise PineconeResponseError(
+                f"Mismatch between chunks count ({len(chunks)}) and extra_metadata_list count ({len(extra_metadata_list)})."
+            )
 
         # Validate vector dimensions - strictly 768 dimensions required
         for i, vec in enumerate(vectors):
@@ -274,9 +306,9 @@ class PineconeService:
         # Build standard vector records: (id, embedding, metadata)
         # embedding is placed in the vector's values; metadata contains ONLY supported fields.
         vector_records = []
-        for chunk, vec in zip(chunks, vectors):
+        for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
             record_id = f"{document_id}#chunk_{chunk.index}"
-            meta = {
+            meta: Dict[str, Any] = {
                 "document_id": document_id,
                 "source_id": document_id,
                 "chunk_index": chunk.index,
@@ -285,6 +317,17 @@ class PineconeService:
                 "character_count": chunk.character_count,
                 "token_estimate": chunk.token_estimate,
             }
+            if extra_metadata_list is not None:
+                extra = extra_metadata_list[idx] or {}
+                for k, v in extra.items():
+                    if k in {"document_id", "source_id", "user_id"} or v is None:
+                        continue
+                    if isinstance(v, (str, int, float, bool)) or (
+                        isinstance(v, list) and all(isinstance(item, str) for item in v)
+                    ):
+                        meta[k] = v
+            if user_id:
+                meta["user_id"] = user_id
             vector_records.append((record_id, vec, meta))
 
         logger.info(
@@ -319,6 +362,7 @@ class PineconeService:
         top_k: Optional[int] = None,
         namespace: Optional[str] = None,
         filter_dict: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Queries the vector index for similar chunks with document-scoped isolation using standard index.query().
 
@@ -341,11 +385,13 @@ class PineconeService:
         target_namespace = namespace if namespace is not None else self.namespace
         index = self.get_index()
 
-        # Build metadata filter for document isolation
+        # Build metadata filter for document and user isolation
         combined_filter: Dict[str, Any] = {}
         if document_id:
             clean_doc_id = normalize_document_id(document_id)
             combined_filter["document_id"] = {"$eq": clean_doc_id}
+        if user_id:
+            combined_filter["user_id"] = {"$eq": user_id}
         if filter_dict:
             for k, v in filter_dict.items():
                 if isinstance(v, dict):
@@ -417,12 +463,14 @@ class PineconeService:
         self,
         document_id: str,
         namespace: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
-        """Deletes all vectors belonging to a document_id using metadata filter on standard index.
+        """Deletes all vectors belonging to a document_id (and optional user_id) using metadata filter on standard index.
 
         Args:
             document_id: Identifier of the document to purge from the index.
             namespace: Target namespace (defaults to self.namespace).
+            user_id: Optional owner user ID to enforce scoped deletion.
 
         Returns:
             True if deletion was successfully requested.
@@ -433,10 +481,14 @@ class PineconeService:
         target_namespace = namespace if namespace is not None else self.namespace
         index = self.get_index()
 
+        delete_filter: Dict[str, Any] = {"document_id": {"$eq": clean_doc_id}}
+        if user_id:
+            delete_filter["user_id"] = {"$eq": user_id}
+
         def _do_delete():
             try:
                 index.delete(
-                    filter={"document_id": {"$eq": clean_doc_id}},
+                    filter=delete_filter,
                     namespace=target_namespace,
                 )
                 logger.info(

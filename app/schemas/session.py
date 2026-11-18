@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.interview import (
     DifficultyLevel,
@@ -65,8 +65,8 @@ class CreateSessionRequest(BaseModel):
     )
     topic: str = Field(
         ...,
-        min_length=2,
-        max_length=100,
+        min_length=1,
+        max_length=255,
         description="Specific interview topic or technology domain",
         examples=["React Hooks"],
     )
@@ -88,6 +88,7 @@ class CreateSessionRequest(BaseModel):
     )
     questions: Optional[List[SessionQuestionInput]] = Field(
         default=None,
+        max_length=20,
         description="Optional list of pre-generated source-grounded questions to initialize the session with",
     )
 
@@ -101,6 +102,21 @@ class CreateSessionRequest(BaseModel):
                 raise ValueError(f"'{info.field_name}' must not be empty or whitespace only.")
             return trimmed
         return value
+
+    @model_validator(mode="after")
+    def validate_topic_bounds(self) -> "CreateSessionRequest":
+        """Allow source-derived titles up to 255 chars (safely capped to DB VARCHAR(100)), while keeping strict bounds for standalone sessions."""
+        if self.source_id:
+            if len(self.topic) < 2:
+                self.topic = f"{self.topic} Source".strip()
+            elif len(self.topic) > 100:
+                self.topic = self.topic[:100].strip()
+        else:
+            if len(self.topic) < 2:
+                raise ValueError("'topic' must be at least 2 characters long.")
+            if len(self.topic) > 100:
+                raise ValueError("'topic' must be at most 100 characters long.")
+        return self
 
 
 class SubmitAnswerRequest(BaseModel):

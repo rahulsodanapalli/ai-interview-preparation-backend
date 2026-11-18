@@ -1,18 +1,46 @@
-"""FastAPI application entrypoint, middleware registration, and router mounting."""
+"""FastAPI application entrypoint, middleware registration, lifespan management, and router mounting."""
 
+from contextlib import asynccontextmanager
 import logging
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.router import api_v1_router
-from app.core.config import settings
+from app.core.config import settings, validate_auth_configuration
 from app.core.logging import configure_logging
+from app.db.session import (
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    DatabasePersistenceError,
+    dispose_engine,
+    get_engine,
+    is_database_configured,
+    is_production_env,
+    validate_database_configuration,
+)
 
 configure_logging(app_env=settings.APP_ENV)
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Validate database & auth configuration on startup and dispose engine on shutdown."""
+    validate_database_configuration()
+    validate_auth_configuration()
+    if is_production_env() or is_database_configured():
+        get_engine()
+    else:
+        logger.info("Starting in non-production mode without DATABASE_URL configured.")
+    try:
+        yield
+    finally:
+        dispose_engine()
+
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -23,17 +51,72 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
-# Configure CORS for local frontend development (React + TypeScript on Vite)
+# Configure CORS for explicitly allowed frontend origins with credentialed HttpOnly cookies
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=False,
+    allow_origins=settings.allowed_cors_origins,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
 )
+
+
+@app.exception_handler(DatabaseConfigurationError)
+async def database_configuration_exception_handler(
+    request: Request, exc: DatabaseConfigurationError
+) -> JSONResponse:
+    """Return 503 when database configuration is missing or invalid."""
+    logger.error(
+        "Database configuration error during %s %s: %s",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Database is not properly configured."},
+    )
+
+
+@app.exception_handler(DatabaseConnectionError)
+@app.exception_handler(OperationalError)
+@app.exception_handler(InterfaceError)
+async def database_connection_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Return 503 when PostgreSQL is unreachable or connection fails."""
+    logger.error(
+        "Database connection error during %s %s: %s",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Database service is currently unavailable."},
+    )
+
+
+@app.exception_handler(DatabasePersistenceError)
+@app.exception_handler(SQLAlchemyError)
+async def database_persistence_exception_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Return 500 when a database persistence or commit operation fails."""
+    logger.error(
+        "Database persistence error during %s %s: %s",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Database persistence error occurred."},
+    )
 
 
 @app.exception_handler(Exception)
