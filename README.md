@@ -99,6 +99,7 @@ BackEnd/
 ├── tests/                              # Offline unit & API integration tests (pytest)
 ├── alembic.ini
 ├── requirements.txt
+├── requirements-dev.txt
 └── .env.example
 ```
 
@@ -117,7 +118,11 @@ source .venv/bin/activate
 ### 2. Install Dependencies
 
 ```bash
+# Production dependencies
 pip install -r requirements.txt
+
+# Development & test dependencies (includes production dependencies)
+pip install -r requirements-dev.txt
 ```
 
 ### 3. Configure Environment Variables
@@ -186,6 +191,7 @@ alembic current
 The test suite uses isolated SQLite in-memory databases and mocked external clients (Ollama, Pinecone, GitHub MCP) so it runs deterministically offline:
 
 ```bash
+pip install -r requirements-dev.txt
 pytest -v
 ```
 

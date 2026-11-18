@@ -24,6 +24,13 @@ class InterviewSession(Base):
         index=True,
         comment="Unique UUID session identifier",
     )
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment="Owner user UUID",
+    )
     role: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
@@ -313,6 +320,13 @@ class DocumentSource(Base):
         primary_key=True,
         index=True,
         comment="Unique source identifier (e.g. doc_... or src_...)",
+    )
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+        comment="Owner user UUID",
     )
     source_type: Mapped[str] = mapped_column(
         String(50),

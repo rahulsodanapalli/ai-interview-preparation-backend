@@ -1,5 +1,6 @@
 """Repository for persisting and querying InterviewSession, InterviewQuestion, and AnswerEvaluation."""
 
+from datetime import datetime, timezone
 import logging
 from typing import List, Optional
 import uuid
@@ -19,12 +20,63 @@ def _safe_rollback(db: Session) -> None:
     """Attempt a rollback on a failed database operation without masking the original error."""
     try:
         db.rollback()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("Failed to roll back database session: %s", type(exc).__name__)
 
 
 class InterviewRepository:
     """Encapsulates all SQLAlchemy CRUD operations for interview sessions and evaluations."""
+
+    def find_recent_duplicate_session(
+        self,
+        db: Session,
+        *,
+        source_id: str,
+        role: str,
+        topic: str,
+        window_seconds: float,
+        user_id: Optional[str] = None,
+    ) -> Optional[InterviewSession]:
+        """Return a recent in-progress session for the same user/source/role/topic within the dedup window."""
+        try:
+            conditions = [
+                InterviewSession.source_id == source_id,
+                InterviewSession.role == role,
+                InterviewSession.topic == topic,
+                InterviewSession.status == SessionStatus.IN_PROGRESS.value,
+            ]
+            if user_id is not None:
+                conditions.append(InterviewSession.user_id == user_id)
+
+            stmt = (
+                select(InterviewSession)
+                .options(
+                    selectinload(InterviewSession.questions).selectinload(
+                        InterviewQuestion.evaluation
+                    )
+                )
+                .where(*conditions)
+                .order_by(InterviewSession.created_at.desc())
+                .limit(1)
+            )
+            existing = db.execute(stmt).scalars().first()
+            if existing is None or existing.created_at is None:
+                return None
+
+            created_dt = existing.created_at
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            if (now_dt - created_dt).total_seconds() < window_seconds:
+                return existing
+            return None
+        except Exception as exc:
+            logger.error(
+                "Database query failed while checking duplicate session for source '%s': %s",
+                source_id,
+                type(exc).__name__,
+            )
+            raise
 
     def create_session(
         self,
@@ -35,11 +87,13 @@ class InterviewRepository:
         total_questions: int,
         current_question_number: int,
         questions_list: List[SessionQuestionItem],
+        user_id: Optional[str] = None,
     ) -> None:
         """Persist a new InterviewSession and any pre-generated questions."""
         try:
             session_db = InterviewSession(
                 id=session_id,
+                user_id=user_id,
                 role=payload.role,
                 experience_level=enum_to_value(payload.experience_level),
                 difficulty=enum_to_value(payload.difficulty),
@@ -76,11 +130,12 @@ class InterviewRepository:
             )
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning(
-                "Failed to persist session '%s' to database: %s; continuing with in-memory session.",
+            logger.error(
+                "Failed to persist session '%s' to database: %s",
                 session_id,
-                exc,
+                type(exc).__name__,
             )
+            raise
 
     def get_session_by_id(self, db: Session, session_id: str) -> Optional[InterviewSession]:
         """Fetch an InterviewSession with eagerly loaded questions and evaluations."""
@@ -96,40 +151,38 @@ class InterviewRepository:
             )
             return db.execute(stmt).scalars().first()
         except Exception as exc:
-            logger.warning(
-                "Failed to retrieve session '%s' from database: %s; falling back to in-memory store.",
+            logger.error(
+                "Failed to retrieve session '%s' from database: %s",
                 session_id,
-                exc,
+                type(exc).__name__,
             )
-            return None
+            raise
 
     def list_sessions(
         self,
         db: Session,
         *,
+        user_id: Optional[str] = None,
         limit: int = 50,
         skip: int = 0,
-    ) -> Optional[List[InterviewSession]]:
-        """List InterviewSessions ordered by creation time descending, or None on DB failure."""
+    ) -> List[InterviewSession]:
+        """List InterviewSessions ordered by creation time descending, scoped by user_id when provided."""
         try:
-            stmt = (
-                select(InterviewSession)
-                .options(
-                    selectinload(InterviewSession.questions).selectinload(
-                        InterviewQuestion.evaluation
-                    )
+            stmt = select(InterviewSession).options(
+                selectinload(InterviewSession.questions).selectinload(
+                    InterviewQuestion.evaluation
                 )
-                .order_by(InterviewSession.created_at.desc())
-                .offset(skip)
-                .limit(limit)
             )
+            if user_id is not None:
+                stmt = stmt.where(InterviewSession.user_id == user_id)
+            stmt = stmt.order_by(InterviewSession.created_at.desc()).offset(skip).limit(limit)
             return list(db.execute(stmt).scalars().all())
         except Exception as exc:
-            logger.warning(
-                "Failed to list sessions from database: %s; falling back to in-memory store.",
-                exc,
+            logger.error(
+                "Failed to list sessions from database: %s",
+                type(exc).__name__,
             )
-            return None
+            raise
 
     def add_question(
         self,
@@ -167,12 +220,13 @@ class InterviewRepository:
             )
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning(
+            logger.error(
                 "Failed to persist question #%d to database for session %s: %s",
                 question_number,
                 session_id,
-                exc,
+                type(exc).__name__,
             )
+            raise
 
     def record_answer_evaluation(
         self,
@@ -233,12 +287,13 @@ class InterviewRepository:
             )
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning(
+            logger.error(
                 "Failed to persist answer evaluation to database for session %s, question #%d: %s",
                 session_id,
                 question_number,
-                exc,
+                type(exc).__name__,
             )
+            raise
 
     def update_status(self, db: Session, *, session_id: str, status_value: str) -> None:
         """Update the lifecycle status of an InterviewSession."""
@@ -253,9 +308,10 @@ class InterviewRepository:
             )
         except Exception as exc:
             _safe_rollback(db)
-            logger.warning(
+            logger.error(
                 "Failed to persist session completion status to database for session %s: %s",
                 session_id,
-                exc,
+                type(exc).__name__,
             )
+            raise
 

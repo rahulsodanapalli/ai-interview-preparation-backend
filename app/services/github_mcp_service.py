@@ -9,14 +9,17 @@ guards against path traversal, adheres to size limits, and guarantees zero token
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import logging
 import os
+import re
 import shutil
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
+from pydantic import ValidationError
 
 from app.core.config import settings
 from app.integrations.github_mcp.protocol import (
@@ -122,6 +125,10 @@ class GitHubMCPService:
         self.server_command = server_command or settings.GITHUB_MCP_SERVER_COMMAND
         self.server_args = server_args
         self._session_factory = session_factory
+        self._session_ctx: ContextVar[Optional[Tuple[ClientSession, Dict[str, Any]]]] = ContextVar(
+            f"github_mcp_session_{id(self)}",
+            default=None,
+        )
 
     def _get_headers(self) -> Dict[str, str]:
         """Construct request headers (for backward compatibility)."""
@@ -135,13 +142,31 @@ class GitHubMCPService:
 
     def _sanitize(self, message: str) -> str:
         """Sanitize sensitive credentials from error messages or logs."""
-        if self._token and self._token in message:
-            return message.replace(self._token, "***")
-        return message
+        sanitized = message
+        if self._token and self._token in sanitized:
+            sanitized = sanitized.replace(self._token, "***")
+        return re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,}\b", "***", sanitized)
 
     def _resolve_server_params(self) -> StdioServerParameters:
-        """Resolve command, arguments, and environment variables for the MCP subprocess."""
-        env = os.environ.copy()
+        """Resolve command, arguments, and allowlisted environment variables for the MCP subprocess."""
+        allowed_env_keys = (
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "LANG",
+            "LC_ALL",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+            "NODE_ENV",
+            "npm_config_cache",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+        )
+        env = {k: os.environ[k] for k in allowed_env_keys if k in os.environ}
         if self._token:
             env["GITHUB_PERSONAL_ACCESS_TOKEN"] = self._token
             env["GITHUB_TOKEN"] = self._token
@@ -165,8 +190,26 @@ class GitHubMCPService:
         )
 
     @asynccontextmanager
+    async def session_scope(self) -> AsyncGenerator[None, None]:
+        """Reuse a single MCP stdio session across multiple consecutive read-only calls."""
+        if self._session_ctx.get() is not None:
+            yield
+            return
+        async with self._get_session() as active:
+            token = self._session_ctx.set(active)
+            try:
+                yield
+            finally:
+                self._session_ctx.reset(token)
+
+    @asynccontextmanager
     async def _get_session(self) -> AsyncGenerator[Tuple[ClientSession, Dict[str, Any]], None]:
         """Establish a genuine MCP client session over stdio and discover tools dynamically."""
+        active = self._session_ctx.get()
+        if active is not None:
+            yield active
+            return
+
         if self._session_factory:
             # Test or custom session factory injection
             async with self._session_factory() as session:
@@ -240,13 +283,40 @@ class GitHubMCPService:
         # Check for rate limiting
         if "rate limit" in msg or "429" in msg:
             raise GitHubRateLimitError(
-                "GitHub API rate limit exceeded. Configure a GITHUB_TOKEN in .env to increase rate limits."
+                "GitHub API rate limit exceeded. Configure a valid GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN in .env, or retry later."
             ) from exc
 
-        # Check for authentication / permission
-        if "bad credentials" in msg or "401" in msg or "403" in msg or "authentication required" in msg:
+        # Check for organization SAML/SSO authorization requirements
+        if "sso" in msg or "saml" in msg or "single sign-on" in msg:
             raise GitHubPermissionError(
-                "GitHub API access denied. For private repositories, verify that your token has read permissions."
+                "Organization SAML/SSO authorization is required for the configured GitHub token. "
+                "Authorize the token for the organization in your GitHub token settings."
+            ) from exc
+
+        # Check for invalid, expired, or missing authentication (401)
+        if (
+            "bad credentials" in msg
+            or "401" in msg
+            or "requires authentication" in msg
+            or "authentication required" in msg
+            or "token expired" in msg
+            or "invalid token" in msg
+        ):
+            raise GitHubPermissionError(
+                "GitHub token is invalid, expired, or missing authentication. "
+                "Update GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN in .env."
+            ) from exc
+
+        # Check for insufficient token permissions (403)
+        if (
+            "403" in msg
+            or "forbidden" in msg
+            or "resource not accessible by personal access token" in msg
+            or "insufficient" in msg
+        ):
+            raise GitHubPermissionError(
+                "GitHub token lacks repository read permission. "
+                "Ensure the token has Contents (Read-only) and Metadata (Read-only) permissions and organization approval."
             ) from exc
 
         # Check for 404 / resource not found
@@ -261,7 +331,9 @@ class GitHubMCPService:
             if is_file_request:
                 raise GitHubFileNotFoundError(self._sanitize(raw_msg)) from exc
             raise GitHubRepoNotFoundError(
-                "Repository not found or you lack permission to access it."
+                "Repository does not exist or is inaccessible with the configured GitHub token. "
+                "If this is a private or organization repository, verify token repository selection, "
+                "Contents (Read-only) permission, and organization approval."
             ) from exc
 
         raise GitHubServiceError(self._sanitize(raw_msg)) from exc
@@ -296,6 +368,11 @@ class GitHubMCPService:
             raise GitHubTimeoutError(f"MCP tool '{tool_name}' call timed out.") from exc
         except MCPError as exc:
             self._handle_mcp_error(exc, is_file_request=is_file_request)
+        except ValidationError as exc:
+            # Official Go github-mcp-server omits empty 'text' field in EmbeddedResource for 0-byte files
+            if is_file_request and "TextResourceContents.text" in str(exc):
+                return {"content": "", "encoding": "utf-8", "size": 0}
+            raise
 
         # 4. Check for is_error / isError flag in tool result
         is_error = getattr(result, "is_error", False) or getattr(result, "isError", False)
@@ -327,38 +404,100 @@ class GitHubMCPService:
             owner, repo_name = parse_repo_identifier(f"{owner_or_url}/{repo}")
 
         async with self._get_session() as (session, tools_map):
-            # Query the search_repositories tool
-            query = f"repo:{owner}/{repo_name}"
-            data = await self._call_read_only_tool(
-                session=session,
-                tool_name="search_repositories",
-                arguments={"query": query},
-                tools_map=tools_map,
-                is_file_request=False,
-            )
-
-            items: List[Dict[str, Any]] = []
-            if isinstance(data, dict):
-                items = data.get("items", [])
-            elif isinstance(data, list):
-                items = data
-
-            # Filter exact match
+            # Query the search_repositories tool (retry with fork:true if initial query finds no match)
             matched_repo = None
             target_full_name = f"{owner}/{repo_name}".lower()
-            for it in items:
-                if isinstance(it, dict) and it.get("full_name", "").lower() == target_full_name:
-                    matched_repo = it
+            search_not_found_exc: Optional[GitHubRepoNotFoundError] = None
+            for query in (f"repo:{owner}/{repo_name}", f"repo:{owner}/{repo_name} fork:true"):
+                try:
+                    data = await self._call_read_only_tool(
+                        session=session,
+                        tool_name="search_repositories",
+                        arguments={"query": query},
+                        tools_map=tools_map,
+                        is_file_request=False,
+                    )
+                except GitHubRepoNotFoundError as exc:
+                    search_not_found_exc = exc
+                    continue
+
+                items: List[Dict[str, Any]] = []
+                if isinstance(data, dict):
+                    items = data.get("items", [])
+                elif isinstance(data, list):
+                    items = data
+
+                for it in items:
+                    if isinstance(it, dict) and (it.get("full_name") or "").lower() == target_full_name:
+                        matched_repo = it
+                        break
+                if not matched_repo and items and isinstance(items[0], dict):
+                    if (items[0].get("name") or "").lower() == repo_name.lower():
+                        matched_repo = items[0]
+                if matched_repo:
                     break
-            if not matched_repo and items and isinstance(items[0], dict):
-                # Fallback to first search result if full_name matches loosely
-                if items[0].get("name", "").lower() == repo_name.lower():
-                    matched_repo = items[0]
 
             if not matched_repo:
-                raise GitHubRepoNotFoundError(
-                    f"Repository '{owner}/{repo_name}' not found or inaccessible."
-                )
+                # Private/org repositories may be omitted or rejected by search_repositories
+                # ("cannot be searched") even when Contents API access is available or returns
+                # a more specific 401/403/SSO error. Probe root contents before failing with 404.
+                try:
+                    root_args = self._build_file_args("", owner, repo_name, None, tools_map)
+                    root_data = await self._call_read_only_tool(
+                        session=session,
+                        tool_name="get_file_contents",
+                        arguments=root_args,
+                        tools_map=tools_map,
+                        is_file_request=True,
+                    )
+                    has_readme = False
+                    if isinstance(root_data, list):
+                        has_readme = any(
+                            isinstance(it, dict)
+                            and it.get("type") == "file"
+                            and is_readme_filename(it.get("name", ""))
+                            for it in root_data
+                        )
+                    elif isinstance(root_data, dict):
+                        stem, _ = os.path.splitext(root_data.get("name", "").lower())
+                        has_readme = stem == "readme"
+
+                    return RepoMetadataResponse(
+                        owner=owner,
+                        repo=repo_name,
+                        full_name=f"{owner}/{repo_name}",
+                        description=None,
+                        default_branch="main",
+                        language=None,
+                        stars_count=0,
+                        forks_count=0,
+                        open_issues_count=0,
+                        topics=[],
+                        is_private=True,
+                        html_url=f"https://github.com/{owner}/{repo_name}",
+                        has_readme=has_readme,
+                    )
+                except (
+                    GitHubPermissionError,
+                    GitHubRateLimitError,
+                    GitHubTimeoutError,
+                    GitHubConnectionError,
+                ):
+                    raise
+                except GitHubFileNotFoundError as exc:
+                    if search_not_found_exc is not None:
+                        raise search_not_found_exc from exc
+                    raise GitHubRepoNotFoundError(
+                        "Repository does not exist or is inaccessible with the configured GitHub token. "
+                        "If this is a private or organization repository, verify token repository selection, "
+                        "Contents (Read-only) permission, and organization approval."
+                    ) from exc
+                except GitHubServiceError as exc:
+                    if search_not_found_exc is not None:
+                        raise search_not_found_exc from exc
+                    raise GitHubRepoNotFoundError(
+                        f"Repository '{owner}/{repo_name}' not found or inaccessible."
+                    ) from exc
 
             # Check if README exists
             has_readme = False
@@ -400,19 +539,21 @@ class GitHubMCPService:
                     except Exception:
                         continue
 
+            owner_obj = matched_repo.get("owner")
+            resolved_owner = (owner_obj.get("login") if isinstance(owner_obj, dict) else None) or owner
             return RepoMetadataResponse(
-                owner=matched_repo.get("owner", {}).get("login", owner) if isinstance(matched_repo.get("owner"), dict) else owner,
-                repo=matched_repo.get("name", repo_name),
-                full_name=matched_repo.get("full_name", f"{owner}/{repo_name}"),
+                owner=resolved_owner,
+                repo=matched_repo.get("name") or repo_name,
+                full_name=matched_repo.get("full_name") or f"{owner}/{repo_name}",
                 description=matched_repo.get("description"),
-                default_branch=matched_repo.get("default_branch", "main"),
+                default_branch=matched_repo.get("default_branch") or "main",
                 language=matched_repo.get("language"),
                 stars_count=matched_repo.get("stargazers_count", 0) or 0,
                 forks_count=matched_repo.get("forks_count", 0) or 0,
                 open_issues_count=matched_repo.get("open_issues_count", 0) or 0,
                 topics=matched_repo.get("topics", []) or [],
                 is_private=matched_repo.get("private", False) or False,
-                html_url=matched_repo.get("html_url", f"https://github.com/{owner}/{repo_name}"),
+                html_url=matched_repo.get("html_url") or f"https://github.com/{owner}/{repo_name}",
                 has_readme=has_readme,
             )
 

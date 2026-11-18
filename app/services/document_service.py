@@ -14,9 +14,10 @@ from app.schemas.document import (
 )
 from app.services.chunking_service import TextChunkingService, get_chunking_service
 from app.services.embedding_service import EmbeddingService, get_embedding_service
-from app.services.pdf_service import PDFService, get_pdf_service
+from app.services.pdf_service import PDFNoTextError, PDFService, get_pdf_service
 from app.services.pinecone_service import PineconeService, get_pinecone_service
 from app.services.source_service import SourceService, get_source_service
+from app.utils.identifiers import supports_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class DocumentService:
         self,
         file: UploadFile,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> DocumentUploadResponse:
         """Validate, extract text, chunk, embed, index in Pinecone, and register a PDF upload."""
         filename, full_text, page_count, character_count, preview = (
@@ -49,30 +51,67 @@ class DocumentService:
         )
 
         document_id = f"doc_{uuid.uuid4().hex[:16]}"
-        chunks = self.chunking_service.create_chunks(full_text)
-        chunk_count = len(chunks)
-
-        chunk_texts = [c.text for c in chunks]
-        vectors = await self.embedding_service.embed_chunks(chunk_texts)
-
-        vector_count = await self.pinecone_service.upsert_document_chunks(
-            document_id=document_id,
-            chunks=chunks,
-            vectors=vectors,
-            filename=filename,
-        )
-
         self.source_service.register_source(
             source_id=document_id,
             source_type=SourceType.DOCUMENT,
             title=filename,
             filename=filename,
-            status=SourceProcessingStatus.COMPLETED,
+            status=SourceProcessingStatus.PROCESSING,
             character_count=character_count,
-            chunk_count=chunk_count,
-            vector_count=vector_count,
             db=db,
+            commit_immediately=True,
+            user_id=user_id,
         )
+
+        vector_upsert_started = False
+        try:
+            chunks = self.chunking_service.create_chunks(full_text)
+            chunk_count = len(chunks)
+            if chunk_count == 0:
+                raise PDFNoTextError("No indexable text chunks could be extracted from the PDF.")
+
+            chunk_texts = [c.text for c in chunks]
+            vectors = await self.embedding_service.embed_chunks(chunk_texts)
+
+            upsert_kwargs = {
+                "document_id": document_id,
+                "chunks": chunks,
+                "vectors": vectors,
+                "filename": filename,
+            }
+            if user_id and supports_kwarg(self.pinecone_service.upsert_document_chunks, "user_id"):
+                upsert_kwargs["user_id"] = user_id
+            vector_upsert_started = True
+            vector_count = await self.pinecone_service.upsert_document_chunks(**upsert_kwargs)
+
+            self.source_service.update_source(
+                source_id=document_id,
+                status=SourceProcessingStatus.COMPLETED,
+                character_count=character_count,
+                chunk_count=chunk_count,
+                vector_count=vector_count,
+                db=db,
+            )
+        except Exception as exc:
+            if vector_upsert_started:
+                try:
+                    delete_kwargs = {"document_id": document_id}
+                    if user_id and supports_kwarg(self.pinecone_service.delete_document, "user_id"):
+                        delete_kwargs["user_id"] = user_id
+                    await self.pinecone_service.delete_document(**delete_kwargs)
+                except Exception as cleanup_exc:
+                    logger.warning("Failed to clean up Pinecone vectors for %s: %s", document_id, cleanup_exc)
+            self.source_service.mark_source_failed(
+                source_id=document_id,
+                error_message=str(exc),
+                db=db,
+                source_type=SourceType.DOCUMENT,
+                title=filename,
+                filename=filename,
+                character_count=character_count,
+                user_id=user_id,
+            )
+            raise
 
         logger.info(
             "Document '%s' successfully ingested into Pinecone: id='%s', pages=%d, chunks=%d, vectors=%d.",

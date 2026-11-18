@@ -33,8 +33,8 @@ def test_cors_preflight_localhost_5173():
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
     assert "GET" in response.headers.get("access-control-allow-methods", "")
-    # Credentials should remain disabled
-    assert response.headers.get("access-control-allow-credentials") is None
+    # Credentials must be enabled for HttpOnly refresh token cookies
+    assert response.headers.get("access-control-allow-credentials") == "true"
 
 
 def test_cors_preflight_127_0_0_1_5173():

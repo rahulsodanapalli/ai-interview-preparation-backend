@@ -2,15 +2,18 @@
 
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import require_active_user
 from app.core.exceptions import (
     handle_interview_ai_errors,
     handle_rag_question_errors,
     handle_session_errors,
 )
 from app.db.session import get_db_optional
+from app.models.auth import User
+from app.utils.identifiers import supports_kwarg
 from app.schemas.document import SourceQuestionsRequest, SourceQuestionsResponse
 from app.schemas.evaluation import RAGEvaluationRequest, RAGEvaluationResponse
 from app.schemas.interview import (
@@ -40,6 +43,7 @@ from app.services.question_generation_service import (
 from app.services.rag_eval_service import RAGEvaluationService, get_rag_eval_service
 from app.services.rag_question_service import RAGQuestionService, get_rag_question_service
 from app.services.session_service import SessionService, get_session_service
+from app.services.source_service import SourceForbiddenError, SourceNotFoundError, SourceService, get_source_service
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,7 @@ router = APIRouter(prefix="/interview", tags=["Interview"])
 async def generate_interview_question(
     payload: InterviewQuestionRequest,
     question_service: QuestionGenerationService = Depends(get_question_generation_service),
+    _current_user: User = Depends(require_active_user),
 ) -> InterviewQuestionResponse:
     """Generate a structured interview question with evaluation criteria and follow-up."""
     with handle_interview_ai_errors(
@@ -104,6 +109,8 @@ async def generate_interview_question(
 async def generate_document_interview_question(
     payload: DocumentQuestionRequest,
     rag_service: RAGQuestionService = Depends(get_rag_question_service),
+    db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> DocumentQuestionResponse:
     """Generate a tailored interview question grounded in candidate document chunks from Pinecone."""
     if not payload.document_id or not payload.document_id.strip():
@@ -116,7 +123,12 @@ async def generate_document_interview_question(
         unexpected_detail="An unexpected internal error occurred while generating the document question.",
         detailed_service_messages=True,
     ):
-        return await rag_service.generate_document_question(payload)
+        kwargs = {}
+        if supports_kwarg(rag_service.generate_document_question, "db"):
+            kwargs["db"] = db
+        if supports_kwarg(rag_service.generate_document_question, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await rag_service.generate_document_question(payload, **kwargs)
 
 
 @router.post(
@@ -138,6 +150,7 @@ async def generate_source_interview_questions(
     payload: SourceQuestionsRequest,
     rag_service: RAGQuestionService = Depends(get_rag_question_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceQuestionsResponse:
     """Generate structured interview questions grounded in source content."""
     if not payload.source_id or not payload.source_id.strip():
@@ -149,7 +162,10 @@ async def generate_source_interview_questions(
     with handle_rag_question_errors(
         unexpected_detail="An unexpected internal error occurred while generating interview questions."
     ):
-        return await rag_service.generate_source_questions(payload, db=db)
+        kwargs = {"db": db}
+        if supports_kwarg(rag_service.generate_source_questions, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await rag_service.generate_source_questions(payload, **kwargs)
 
 
 @router.post(
@@ -171,6 +187,7 @@ async def generate_source_interview_questions(
 async def evaluate_interview_answer(
     payload: InterviewEvaluationRequest,
     evaluation_service: AnswerEvaluationService = Depends(get_answer_evaluation_service),
+    _current_user: User = Depends(require_active_user),
 ) -> InterviewEvaluationResponse:
     """Evaluate candidate answer and provide structured feedback and rubric scoring."""
     with handle_interview_ai_errors(
@@ -198,6 +215,7 @@ async def evaluate_interview_answer(
 async def evaluate_rag_output(
     payload: RAGEvaluationRequest,
     eval_service: RAGEvaluationService = Depends(get_rag_eval_service),
+    _current_user: User = Depends(require_active_user),
 ) -> RAGEvaluationResponse:
     """Assess RAG generation accuracy, groundedness, and retrieval quality."""
     try:
@@ -229,10 +247,19 @@ async def evaluate_rag_output(
 async def create_session(
     payload: CreateSessionRequest,
     session_service: SessionService = Depends(get_session_service),
+    source_service: SourceService = Depends(get_source_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SessionDetailResponse:
-    """Create a new interview session."""
-    return session_service.create_session(payload, db=db)
+    """Create a new interview session owned by the authenticated user."""
+    if payload.source_id:
+        try:
+            source_service.get_source(payload.source_id, db=db, user_id=current_user.id)
+        except SourceForbiddenError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except SourceNotFoundError:
+            pass
+    return session_service.create_session(payload, db=db, user_id=current_user.id)
 
 
 @router.get(
@@ -244,13 +271,14 @@ async def create_session(
     responses={200: {"description": "List of interview sessions retrieved successfully"}},
 )
 async def list_sessions(
-    limit: int = 50,
-    skip: int = 0,
+    limit: int = Query(50, ge=1, le=100),
+    skip: int = Query(0, ge=0),
     session_service: SessionService = Depends(get_session_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> List[SessionDetailResponse]:
-    """Retrieve list of interview sessions with optional pagination."""
-    return session_service.list_sessions(db=db, limit=limit, skip=skip)
+    """Retrieve list of interview sessions belonging to the authenticated user."""
+    return session_service.list_sessions(db=db, limit=limit, skip=skip, user_id=current_user.id)
 
 
 @router.get(
@@ -261,6 +289,7 @@ async def list_sessions(
     description="Retrieve full details, question history, and progress for an interview session.",
     responses={
         200: {"description": "Session details retrieved successfully"},
+        403: {"description": "Forbidden"},
         404: {"description": "Interview session not found"},
     },
 )
@@ -268,10 +297,11 @@ async def get_session(
     session_id: str,
     session_service: SessionService = Depends(get_session_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SessionDetailResponse:
     """Retrieve session details and current progress."""
     with handle_session_errors():
-        return session_service.get_session(session_id, db=db)
+        return session_service.get_session(session_id, db=db, user_id=current_user.id)
 
 
 @router.post(
@@ -283,6 +313,7 @@ async def get_session(
     responses={
         200: {"description": "Next question generated successfully"},
         400: {"description": "Invalid session state, question unanswered, or maximum questions reached"},
+        403: {"description": "Forbidden"},
         404: {"description": "Interview session not found"},
         502: {"description": "Bad gateway from AI model"},
         503: {"description": "Ollama service unavailable or timed out"},
@@ -293,10 +324,13 @@ async def get_next_question_for_session(
     session_service: SessionService = Depends(get_session_service),
     question_service: QuestionGenerationService = Depends(get_question_generation_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SessionNextQuestionResponse:
     """Generate the next interview question for the session using Qwen 2.5."""
     with handle_session_errors():
-        session = session_service.validate_can_generate_question(session_id, db=db)
+        session = session_service.validate_can_generate_question(
+            session_id, db=db, user_id=current_user.id
+        )
 
     question_payload = InterviewQuestionRequest(
         role=session.role,
@@ -312,7 +346,10 @@ async def get_next_question_for_session(
     ):
         question_data = await question_service.generate_question(question_payload)
 
-    return session_service.add_question_to_session(session_id, question_data, db=db)
+    with handle_session_errors():
+        return session_service.add_question_to_session(
+            session_id, question_data, db=db, user_id=current_user.id
+        )
 
 
 @router.post(
@@ -324,6 +361,7 @@ async def get_next_question_for_session(
     responses={
         200: {"description": "Answer evaluated and recorded successfully"},
         400: {"description": "Invalid session state, question already answered, or session completed"},
+        403: {"description": "Forbidden"},
         404: {"description": "Interview session not found"},
         422: {"description": "Validation error in submitted answer"},
         502: {"description": "Bad gateway from AI model"},
@@ -336,6 +374,7 @@ async def submit_answer_for_session(
     session_service: SessionService = Depends(get_session_service),
     evaluation_service: AnswerEvaluationService = Depends(get_answer_evaluation_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SessionSubmitAnswerResponse:
     """Submit candidate answer and evaluate against expected criteria."""
     with handle_session_errors():
@@ -343,6 +382,7 @@ async def submit_answer_for_session(
             session_id=session_id,
             question_number=payload.question_number,
             db=db,
+            user_id=current_user.id,
         )
 
     eval_payload = InterviewEvaluationRequest(
@@ -357,13 +397,15 @@ async def submit_answer_for_session(
     ):
         evaluation = await evaluation_service.evaluate_answer(eval_payload)
 
-    return session_service.record_answer_and_evaluation(
-        session_id=session_id,
-        question_number=target_question.question_number,
-        candidate_answer=payload.candidate_answer,
-        evaluation=evaluation,
-        db=db,
-    )
+    with handle_session_errors():
+        return session_service.record_answer_and_evaluation(
+            session_id=session_id,
+            question_number=target_question.question_number,
+            candidate_answer=payload.candidate_answer,
+            evaluation=evaluation,
+            db=db,
+            user_id=current_user.id,
+        )
 
 
 @router.post(
@@ -374,6 +416,7 @@ async def submit_answer_for_session(
     description="Mark session as completed and calculate overall score, rubric rating, strengths, and improvement areas.",
     responses={
         200: {"description": "Session completed and summary generated successfully"},
+        403: {"description": "Forbidden"},
         404: {"description": "Interview session not found"},
     },
 )
@@ -381,7 +424,8 @@ async def complete_session(
     session_id: str,
     session_service: SessionService = Depends(get_session_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> InterviewSessionSummaryResponse:
     """Complete the session and produce final interview summary."""
     with handle_session_errors():
-        return session_service.complete_session(session_id, db=db)
+        return session_service.complete_session(session_id, db=db, user_id=current_user.id)

@@ -4,6 +4,7 @@ Generates dense vector embeddings using local Ollama embedding models (e.g., nom
 with strict dimension consistency validation, robust error handling, and safe logging.
 """
 
+import asyncio
 import logging
 import math
 from typing import Any, Dict, List, Optional
@@ -75,10 +76,12 @@ class EmbeddingService:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ):
         self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
         self.model = model or settings.OLLAMA_EMBEDDING_MODEL
         self.timeout = timeout or settings.OLLAMA_TIMEOUT_SECONDS
+        self.max_retries = settings.OLLAMA_MAX_RETRIES if max_retries is None else max(0, max_retries)
 
     async def check_health(self) -> Dict[str, Any]:
         """Checks if Ollama is reachable and verifies if the configured embedding model is installed.
@@ -158,20 +161,39 @@ class EmbeddingService:
     ) -> httpx.Response:
         """Sends an HTTP POST request to an Ollama embedding endpoint with standardized error mapping."""
         url = f"{self.base_url}{endpoint}"
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, json=payload)
-        except (httpx.ConnectError, httpx.NetworkError) as exc:
-            logger.error("Failed to connect to Ollama embedding endpoint at %s: %s", url, exc)
-            raise EmbeddingConnectionError(
-                "Unable to connect to Ollama embedding service. Please ensure Ollama is running."
-            ) from exc
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
-            logger.error("Timeout during Ollama embedding request to %s: %s", url, exc)
-            raise EmbeddingTimeoutError("Embedding request to Ollama timed out.") from exc
-        except Exception as exc:
-            logger.error("Unexpected network error while contacting Ollama at %s: %s", url, exc)
-            raise EmbeddingResponseError(f"Failed to communicate with Ollama service: {exc}") from exc
+        max_attempts = max(1, 1 + self.max_retries)
+        response: Optional[httpx.Response] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(url, json=payload)
+            except (httpx.ConnectError, httpx.NetworkError) as exc:
+                if attempt < max_attempts:
+                    logger.warning("Transient connection error to Ollama embed (attempt %d/%d): %s", attempt, max_attempts, exc)
+                    await asyncio.sleep(0.05 * attempt)
+                    continue
+                logger.error("Failed to connect to Ollama embedding endpoint at %s: %s", url, exc)
+                raise EmbeddingConnectionError(
+                    "Unable to connect to Ollama embedding service. Please ensure Ollama is running."
+                ) from exc
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+                if attempt < max_attempts:
+                    logger.warning("Transient timeout from Ollama embed (attempt %d/%d): %s", attempt, max_attempts, exc)
+                    await asyncio.sleep(0.05 * attempt)
+                    continue
+                logger.error("Timeout during Ollama embedding request to %s: %s", url, exc)
+                raise EmbeddingTimeoutError("Embedding request to Ollama timed out.") from exc
+            except Exception as exc:
+                logger.error("Unexpected network error while contacting Ollama at %s: %s", url, exc)
+                raise EmbeddingResponseError(f"Failed to communicate with Ollama service: {exc}") from exc
+
+            if response.status_code in (502, 503, 504) and attempt < max_attempts:
+                logger.warning("Transient HTTP %s from Ollama %s (attempt %d/%d)", response.status_code, endpoint, attempt, max_attempts)
+                await asyncio.sleep(0.05 * attempt)
+                continue
+            break
+
+        assert response is not None
 
         # Handle HTTP error statuses
         if response.status_code == 404:

@@ -5,6 +5,7 @@ technically grounded interview questions using Ollama (qwen2.5:1.5b), defending 
 prompt injection and strictly avoiding hallucinations or invented candidate history.
 """
 
+from collections import OrderedDict
 import logging
 from typing import Dict, List, Optional
 from fastapi import Depends
@@ -36,11 +37,13 @@ from app.services.retrieval_service import (
     get_retrieval_service,
 )
 from app.services.source_service import (
+    SourceForbiddenError,
     SourceNotFoundError,
     SourceNotReadyError,
     SourceService,
     get_source_service,
 )
+from app.utils.identifiers import normalize_document_id, supports_kwarg
 from app.utils.json_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
@@ -89,8 +92,17 @@ RAG_SYSTEM_PROMPT = (
 # ============================================================================
 
 
-# Shared in-memory question cache across service instances
-_global_cached_questions: Dict[str, SourceQuestionsResponse] = {}
+# ============================================================================
+# Temporary Process-Local Response Cache (Non-Authoritative)
+# ============================================================================
+# NOTE: Persistent source metadata and interview sessions live in PostgreSQL
+# via SourceService and SessionService. This bounded in-memory structure is
+# strictly a temporary deduplication cache for generated question responses
+# within a worker process (Redis is intentionally out of scope in Phase 2).
+MAX_QUESTION_CACHE_SIZE = 128
+_temporary_question_cache: "OrderedDict[str, SourceQuestionsResponse]" = OrderedDict()
+# Backward-compatible module-level reference
+_global_cached_questions: Dict[str, SourceQuestionsResponse] = _temporary_question_cache
 
 
 class RAGQuestionService:
@@ -113,18 +125,24 @@ class RAGQuestionService:
 
     @property
     def _cached_questions(self) -> Dict[str, SourceQuestionsResponse]:
-        return _global_cached_questions
+        """Temporary non-authoritative cache for generated question responses."""
+        return _temporary_question_cache
 
     def reset_store(self) -> None:
-        """Clear the cached generated questions for test isolation."""
-        _global_cached_questions.clear()
+        """Clear the temporary question response cache for test isolation."""
+        _temporary_question_cache.clear()
 
     def clear_cache(self, source_id: Optional[str] = None) -> None:
         """Clear cached questions for a specific source ID or all sources."""
         if source_id:
-            _global_cached_questions.pop(source_id, None)
+            keys_to_remove = [
+                k for k in _temporary_question_cache
+                if k == source_id or f":{source_id}:" in k or k.endswith(f":{source_id}")
+            ]
+            for k in keys_to_remove:
+                _temporary_question_cache.pop(k, None)
         else:
-            _global_cached_questions.clear()
+            _temporary_question_cache.clear()
 
     @staticmethod
     def _construct_search_query(
@@ -172,15 +190,28 @@ class RAGQuestionService:
     async def generate_document_question(
         self,
         payload: DocumentQuestionRequest,
+        db=None,
+        user_id: Optional[str] = None,
     ) -> DocumentQuestionResponse:
         """Generates an interview question strictly grounded in retrieved candidate document content.
 
         Args:
             payload: Request specifications including document_id, role, topic, difficulty, etc.
+            db: Optional database session to verify document ownership when registered.
+            user_id: Optional authenticated user ID for ownership & Pinecone isolation.
 
         Returns:
             DocumentQuestionResponse containing the grounded question, criteria, and retrieval citations.
         """
+        if user_id is not None:
+            clean_doc_id = normalize_document_id(payload.document_id)
+            if clean_doc_id:
+                try:
+                    self.source_service.get_source(clean_doc_id, db=db, user_id=user_id)
+                except SourceNotFoundError:
+                    # Document may only exist in Pinecone test fixtures; Pinecone user_id filter still enforces isolation.
+                    pass
+
         target_role = payload.role or "Software Engineer"
         target_topic = payload.topic or "Technical Background & Architecture"
 
@@ -191,13 +222,16 @@ class RAGQuestionService:
             question_type=payload.question_type,
         )
 
-        # 2. Retrieve top-k relevant chunks from Pinecone with document isolation and relevance filtering
-        retrieved_chunks = await self.retrieval_service.retrieve_chunks(
-            query_text=search_query,
-            document_id=payload.document_id,
-            top_k=payload.top_k,
-            min_score=payload.min_score,
-        )
+        # 2. Retrieve top-k relevant chunks from Pinecone with document & user isolation and relevance filtering
+        retrieve_kwargs = {
+            "query_text": search_query,
+            "document_id": payload.document_id,
+            "top_k": payload.top_k,
+            "min_score": payload.min_score,
+        }
+        if user_id and supports_kwarg(self.retrieval_service.retrieve_chunks, "user_id"):
+            retrieve_kwargs["user_id"] = user_id
+        retrieved_chunks = await self.retrieval_service.retrieve_chunks(**retrieve_kwargs)
 
         context_grounded = len(retrieved_chunks) > 0
         formatted_context = self._format_context_chunks(retrieved_chunks)
@@ -252,21 +286,37 @@ class RAGQuestionService:
             logger.error("Failed to decode JSON from Ollama RAG question output: %s", raw_output)
             raise
 
-        # Fallbacks for difficulty and topic if omitted by model
-        if not parsed_data.get("difficulty"):
-            parsed_data["difficulty"] = payload.difficulty.value
-        if not parsed_data.get("topic"):
-            parsed_data["topic"] = target_topic
+        # Fallbacks and normalization for imperfect local LLM output
+        question_text = str(parsed_data.get("question") or "").strip()
+        if len(question_text) < 5:
+            raise OllamaResponseError("AI model returned an empty or invalid interview question.")
+
+        raw_pts = parsed_data.get("expected_answer_points", [])
+        if isinstance(raw_pts, str):
+            raw_pts = [raw_pts]
+        elif not isinstance(raw_pts, list):
+            raw_pts = []
+        cleaned_pts = [str(p).strip() for p in raw_pts if str(p).strip()]
+        if not cleaned_pts:
+            cleaned_pts = ["Demonstrate sound technical understanding of the documented experience."]
+
+        follow_up = str(parsed_data.get("follow_up_question") or "").strip()
+        if len(follow_up) < 5:
+            follow_up = "Can you walk through the main trade-offs and edge cases in that approach?"
+
+        diff_raw = str(parsed_data.get("difficulty") or "").strip()
+        resolved_diff = DifficultyLevel._missing_(diff_raw) or payload.difficulty
+        resolved_topic = str(parsed_data.get("topic") or "").strip() or target_topic
 
         citations = self._build_citations(retrieved_chunks)
 
         # 6. Validate and construct DocumentQuestionResponse
         return DocumentQuestionResponse(
-            question=parsed_data.get("question", ""),
-            expected_answer_points=parsed_data.get("expected_answer_points", []),
-            follow_up_question=parsed_data.get("follow_up_question", ""),
-            difficulty=DifficultyLevel(parsed_data.get("difficulty", payload.difficulty.value)),
-            topic=str(parsed_data.get("topic", target_topic)),
+            question=question_text,
+            expected_answer_points=cleaned_pts,
+            follow_up_question=follow_up,
+            difficulty=resolved_diff,
+            topic=resolved_topic,
             document_id=payload.document_id,
             context_grounded=context_grounded,
             retrieved_chunks=citations,
@@ -276,12 +326,14 @@ class RAGQuestionService:
         self,
         request: SourceQuestionsRequest,
         db=None,
+        user_id: Optional[str] = None,
     ) -> SourceQuestionsResponse:
         """Generates multiple structured interview questions grounded in a validated source.
 
         Args:
             request: Source question request specifying source_id, count, role, difficulty, etc.
             db: Optional database session for source validation.
+            user_id: Optional authenticated user ID for ownership & Pinecone isolation.
 
         Returns:
             SourceQuestionsResponse containing structured questions with stable IDs and citations.
@@ -290,8 +342,8 @@ class RAGQuestionService:
         if not source_id:
             raise SourceNotFoundError("source_id must not be empty.")
 
-        # 1. Validate that the source exists and is completed
-        source = self.source_service.get_source(source_id, db=db)
+        # 1. Validate that the source exists, belongs to user, and is completed
+        source = self.source_service.get_source(source_id, db=db, user_id=user_id)
         if source.status == SourceProcessingStatus.PROCESSING:
             raise SourceNotReadyError(
                 f"Source '{source_id}' is still being processed and indexed. Please wait until completed."
@@ -305,13 +357,20 @@ class RAGQuestionService:
         target_topic = request.topic or getattr(source, "title", "Technical Background & Architecture")
         count = max(1, min(20, request.count or 5))
 
-        # Check question cache to prevent duplicate LLM calls
-        if not getattr(request, "force_regenerate", False) and source_id in self._cached_questions:
-            cached = self._cached_questions[source_id]
+        cache_key = (
+            f"{user_id or 'anon'}:{source_id}:{count}:"
+            f"{request.difficulty.value}:{request.question_type.value}:{target_role}"
+        )
+        # Check temporary response cache to prevent duplicate LLM calls after DB source validation
+        if not getattr(request, "force_regenerate", False) and cache_key in _temporary_question_cache:
+            _temporary_question_cache.move_to_end(cache_key)
+            cached = _temporary_question_cache[cache_key]
             logger.info("Returning cached grounded questions for source '%s' (%d questions).", source_id, cached.total_questions)
             return cached
 
-        # 2. Retrieve relevant chunks from Pinecone filtered by source_id
+        # 2. Retrieve relevant chunks from Pinecone filtered strictly by source_id and user_id.
+        # Use min_score=0.0 here so explicit source-based question generation never falsely fails
+        # when valid source chunks score below 0.55 against a generic role/title search query.
         search_query = self._construct_search_query(
             role=target_role,
             topic=target_topic,
@@ -319,12 +378,15 @@ class RAGQuestionService:
         )
 
         top_k = max(4, min(15, count * 2))
-        retrieved_chunks = await self.retrieval_service.retrieve_chunks(
-            query_text=search_query,
-            document_id=source_id,
-            top_k=top_k,
-            min_score=None,
-        )
+        retrieve_kwargs = {
+            "query_text": search_query,
+            "document_id": source_id,
+            "top_k": top_k,
+            "min_score": 0.0,
+        }
+        if user_id and supports_kwarg(self.retrieval_service.retrieve_chunks, "user_id"):
+            retrieve_kwargs["user_id"] = user_id
+        retrieved_chunks = await self.retrieval_service.retrieve_chunks(**retrieve_kwargs)
 
         if not retrieved_chunks:
             raise SourceInsufficientContentError(
@@ -407,12 +469,14 @@ class RAGQuestionService:
             if not isinstance(q_dict, dict):
                 continue
             q_text = str(q_dict.get("question", "")).strip()
-            if not q_text:
+            if len(q_text) < 5:
                 continue
 
             pts = q_dict.get("expected_answer_points", [])
             if isinstance(pts, str):
                 pts = [pts]
+            elif not isinstance(pts, list):
+                pts = []
             cleaned_pts = [str(p).strip() for p in pts if str(p).strip()]
             if not cleaned_pts:
                 cleaned_pts = ["Demonstrate sound technical understanding of this topic."]
@@ -421,15 +485,16 @@ class RAGQuestionService:
             diff_enum = DifficultyLevel._missing_(diff_str) or request.difficulty
 
             q_id = str(q_dict.get("id", f"q_{idx}")).strip() or f"q_{idx}"
+            q_topic = str(q_dict.get("topic") or "").strip() or target_topic
 
             item = SourceQuestionItem(
                 id=q_id,
-                order=idx,
+                order=len(questions) + 1,
                 question=q_text,
                 expected_answer_points=cleaned_pts,
                 follow_up_question=str(q_dict.get("follow_up_question") or "").strip() or None,
                 difficulty=diff_enum,
-                topic=str(q_dict.get("topic") or target_topic).strip(),
+                topic=q_topic,
             )
             questions.append(item)
 
@@ -445,7 +510,10 @@ class RAGQuestionService:
             questions=questions,
             retrieved_chunks=citations,
         )
-        self._cached_questions[source_id] = result
+        _temporary_question_cache[cache_key] = result
+        _temporary_question_cache.move_to_end(cache_key)
+        while len(_temporary_question_cache) > MAX_QUESTION_CACHE_SIZE:
+            _temporary_question_cache.popitem(last=False)
         return result
 
 

@@ -5,8 +5,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.dependencies.auth import require_active_user
 from app.core.exceptions import handle_rag_question_errors, handle_url_ingestion_errors
 from app.db.session import get_db_optional
+from app.models.auth import User
 from app.schemas.document import (
     SourceQuestionsRequest,
     SourceQuestionsResponse,
@@ -17,8 +19,9 @@ from app.schemas.document import (
 from app.schemas.session import CreateSessionRequest, SessionDetailResponse
 from app.services.rag_question_service import RAGQuestionService, get_rag_question_service
 from app.services.session_service import SessionService, get_session_service
-from app.services.source_service import SourceNotFoundError, SourceService, get_source_service
+from app.services.source_service import SourceForbiddenError, SourceNotFoundError, SourceService, get_source_service
 from app.services.url_service import URLService, get_url_service
+from app.utils.identifiers import supports_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +50,16 @@ async def ingest_source_url(
     payload: UrlIngestRequest,
     url_service: URLService = Depends(get_url_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceUploadResponse:
     """Ingest a public URL or GitHub repository as an interview context source."""
     with handle_url_ingestion_errors(
         unexpected_detail="An unexpected error occurred while processing the source URL."
     ):
-        return await url_service.ingest_url(url=payload.url, db=db)
+        kwargs = {"url": payload.url, "db": db}
+        if supports_kwarg(url_service.ingest_url, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await url_service.ingest_url(**kwargs)
 
 
 @router.get(
@@ -63,6 +70,7 @@ async def ingest_source_url(
     description="Check the processing and indexing status of a source by source ID.",
     responses={
         200: {"description": "Source status retrieved successfully"},
+        403: {"description": "Forbidden"},
         404: {"description": "Source not found"},
     },
 )
@@ -70,11 +78,14 @@ async def get_source_status(
     source_id: str,
     source_service: SourceService = Depends(get_source_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceStatusResponse:
     """Retrieve indexing status and metrics for a source ID."""
     clean_id = (source_id or "").strip()
     try:
-        return source_service.get_source(clean_id, db=db)
+        return source_service.get_source(clean_id, db=db, user_id=current_user.id)
+    except SourceForbiddenError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except SourceNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
@@ -91,9 +102,10 @@ async def list_sources(
     skip: int = Query(0, ge=0),
     source_service: SourceService = Depends(get_source_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> List[SourceStatusResponse]:
-    """List all registered sources with optional pagination."""
-    return source_service.list_sources(db=db, limit=limit, skip=skip)
+    """List all registered sources owned by the authenticated user with optional pagination."""
+    return source_service.list_sources(db=db, limit=limit, skip=skip, user_id=current_user.id)
 
 
 @router.post(
@@ -105,6 +117,7 @@ async def list_sources(
     responses={
         200: {"description": "Grounded interview questions generated successfully"},
         400: {"description": "Source has not finished processing or contains insufficient content"},
+        403: {"description": "Forbidden"},
         404: {"description": "Source not found"},
         502: {"description": "Bad gateway from AI model"},
         503: {"description": "Pinecone or Ollama service is unavailable"},
@@ -115,6 +128,7 @@ async def generate_source_questions(
     payload: Optional[SourceQuestionsRequest] = None,
     rag_service: RAGQuestionService = Depends(get_rag_question_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SourceQuestionsResponse:
     """Generate structured interview questions grounded in source content."""
     clean_id = (source_id or "").strip()
@@ -128,7 +142,10 @@ async def generate_source_questions(
     with handle_rag_question_errors(
         unexpected_detail="An unexpected internal error occurred while generating source interview questions."
     ):
-        return await rag_service.generate_source_questions(req, db=db)
+        kwargs = {"db": db}
+        if supports_kwarg(rag_service.generate_source_questions, "user_id"):
+            kwargs["user_id"] = current_user.id
+        return await rag_service.generate_source_questions(req, **kwargs)
 
 
 @router.post(
@@ -143,6 +160,7 @@ async def generate_source_questions(
     responses={
         201: {"description": "Interview session initialized successfully"},
         400: {"description": "Invalid source state, missing questions, or validation error"},
+        403: {"description": "Forbidden"},
         404: {"description": "Source not found"},
     },
 )
@@ -151,20 +169,23 @@ async def create_source_session(
     session_service: SessionService = Depends(get_session_service),
     source_service: SourceService = Depends(get_source_service),
     db: Optional[Session] = Depends(get_db_optional),
+    current_user: User = Depends(require_active_user),
 ) -> SessionDetailResponse:
     """Start an interview session linked to a source ID and optional pre-generated questions."""
     if payload.source_id:
         try:
-            source = source_service.get_source(payload.source_id, db=db)
+            source = source_service.get_source(payload.source_id, db=db, user_id=current_user.id)
             if source.status != "completed":
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Source '{payload.source_id}' is not ready (status: {source.status}).",
                 )
+        except SourceForbiddenError as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
         except SourceNotFoundError:
             logger.info(
                 "Source ID '%s' not registered in database; proceeding with session creation.",
                 payload.source_id,
             )
 
-    return session_service.create_session(payload, db=db)
+    return session_service.create_session(payload, db=db, user_id=current_user.id)

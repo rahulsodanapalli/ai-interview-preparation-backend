@@ -1,14 +1,13 @@
 """Standalone Interview Question Generation Service using local Ollama LLM."""
 
-import json
 import logging
 from typing import Optional
 from fastapi import Depends
 from pydantic import ValidationError
 
-from app.schemas.interview import InterviewQuestionRequest, InterviewQuestionResponse
+from app.schemas.interview import DifficultyLevel, InterviewQuestionRequest, InterviewQuestionResponse
 from app.services.ollama_service import OllamaResponseError, OllamaService, get_ollama_service
-from app.utils.json_parser import strip_markdown_fences
+from app.utils.json_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +63,32 @@ class QuestionGenerationService:
             format="json",
         )
 
-        cleaned_output = strip_markdown_fences(raw_output)
+        parsed_data = parse_llm_json(
+            raw_output,
+            error_cls=QuestionOutputFormatError,
+            decode_error_message="The AI model returned an invalid JSON response.",
+            type_error_message="The AI model returned an unexpected JSON structure.",
+        )
 
-        try:
-            parsed_data = json.loads(cleaned_output)
-        except json.JSONDecodeError as exc:
-            logger.error("Failed to decode JSON from AI model response: %s", raw_output)
-            raise QuestionOutputFormatError("The AI model returned an invalid JSON response.") from exc
-
-        if not isinstance(parsed_data, dict):
-            logger.error("AI model response was not a JSON dictionary: %s", parsed_data)
-            raise QuestionOutputFormatError("The AI model returned an unexpected JSON structure.")
-
-        if not parsed_data.get("difficulty"):
+        raw_diff = parsed_data.get("difficulty")
+        if not raw_diff or DifficultyLevel._missing_(raw_diff) is None:
             parsed_data["difficulty"] = payload.difficulty.value
-        if not parsed_data.get("topic"):
+
+        raw_topic = parsed_data.get("topic")
+        if not isinstance(raw_topic, str) or not raw_topic.strip():
             parsed_data["topic"] = payload.topic
+
+        raw_points = parsed_data.get("expected_answer_points")
+        if isinstance(raw_points, str) and raw_points.strip():
+            parsed_data["expected_answer_points"] = [raw_points.strip()]
+        elif isinstance(raw_points, list):
+            cleaned_points = [str(p).strip() for p in raw_points if str(p).strip()]
+            if cleaned_points:
+                parsed_data["expected_answer_points"] = cleaned_points
+
+        raw_followup = parsed_data.get("follow_up_question")
+        if not isinstance(raw_followup, str) or len(raw_followup.strip()) < 5:
+            parsed_data["follow_up_question"] = "Can you walk through an edge case or trade-off with that approach?"
 
         try:
             return InterviewQuestionResponse.model_validate(parsed_data)

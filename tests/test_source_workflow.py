@@ -445,6 +445,7 @@ def test_generate_questions_from_source_success():
         character_count=1200,
         chunk_count=3,
         vector_count=3,
+        user_id="test-user-0001",
     )
 
     app.dependency_overrides[get_ollama_service] = lambda: MockOllamaForQuestions()
@@ -498,6 +499,7 @@ def test_generate_questions_processing_source_returns_400():
         source_type=SourceType.URL,
         title="Pending Page",
         status=SourceProcessingStatus.PROCESSING,
+        user_id="test-user-0001",
     )
 
     response = client.post(
@@ -523,6 +525,7 @@ def test_start_session_linked_to_source_with_questions():
         source_type=SourceType.DOCUMENT,
         title="system_design.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     session_payload = {
@@ -588,6 +591,7 @@ def test_session_creation_duplicate_prevented():
         source_type=SourceType.DOCUMENT,
         title="resume.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     payload = {
@@ -705,6 +709,7 @@ def test_source_questions_ollama_malformed_json_returns_502():
         source_type=SourceType.DOCUMENT,
         title="doc.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     try:
@@ -732,6 +737,7 @@ def test_source_questions_automatic_sensible_defaults():
         source_type=SourceType.DOCUMENT,
         title="Resume.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     recorded_calls = []
@@ -806,6 +812,7 @@ def test_source_questions_cache_prevents_duplicate_generation():
         source_type=SourceType.DOCUMENT,
         title="TechSpec.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     llm_call_count = 0
@@ -1232,6 +1239,7 @@ def test_source_questions_allowed_counts_5_10_15_20():
         source_type=SourceType.DOCUMENT,
         title="MicroservicesArchitecture.pdf",
         status=SourceProcessingStatus.COMPLETED,
+        user_id="test-user-0001",
     )
 
     class CountingOllama(OllamaService):

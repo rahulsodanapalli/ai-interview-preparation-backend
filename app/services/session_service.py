@@ -1,9 +1,9 @@
 """Interview Session Management Service with Database Persistence.
 
 This service coordinates interview lifecycles, question sequencing, answer evaluation
-tracking, and performance summaries. It delegates relational persistence to
-InterviewRepository when a database session is provided, while maintaining
-in-memory caching for fast lookups and offline/unit-test compatibility.
+tracking, and performance summaries. In production, PostgreSQL via InterviewRepository
+is the single source of truth; the in-memory store is strictly limited to
+non-production development/testing when no database session is configured.
 """
 
 from datetime import datetime, timezone
@@ -11,8 +11,10 @@ import logging
 from typing import Dict, List, Optional
 import uuid
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.db.session import DatabaseConfigurationError, commit_session, is_production_env
 from app.models.interview import InterviewSession
 from app.repositories.interview_repository import InterviewRepository
 from app.schemas.interview import (
@@ -43,6 +45,10 @@ class SessionNotFoundError(Exception):
 
 class SessionStateError(Exception):
     """Raised when an invalid session lifecycle transition or state rule is violated."""
+
+
+class SessionForbiddenError(Exception):
+    """Raised when a user attempts to access or mutate another user's interview session."""
 
 
 def _db_model_to_session_detail(session_db: InterviewSession) -> SessionDetailResponse:
@@ -100,19 +106,56 @@ class SessionService:
     DUPLICATE_WINDOW_SECONDS = 10.0
 
     def __init__(self, repository: Optional[InterviewRepository] = None) -> None:
-        self._sessions: Dict[str, SessionDetailResponse] = {}
+        # Development/testing-only in-memory store used strictly when db is None in non-production.
+        self._dev_sessions: Dict[str, SessionDetailResponse] = {}
+        self._dev_session_owners: Dict[str, Optional[str]] = {}
         self._repository = repository or InterviewRepository()
+
+    @property
+    def _sessions(self) -> Dict[str, SessionDetailResponse]:
+        """Backward-compatible alias for development-only in-memory store."""
+        return self._dev_sessions
+
+    @staticmethod
+    def _require_db_in_production(db: Optional[Session]) -> None:
+        """Fail fast if a database session is absent in production."""
+        if db is None and is_production_env():
+            raise DatabaseConfigurationError(
+                "Database session is required in production. In-memory session fallback is disabled."
+            )
 
     def _find_recent_duplicate_session(
         self,
         payload: CreateSessionRequest,
+        db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[SessionDetailResponse]:
         """Return an existing in-progress source session if created within the dedup window."""
         if not payload.source_id:
             return None
 
+        if db is not None:
+            existing_db = self._repository.find_recent_duplicate_session(
+                db,
+                source_id=payload.source_id,
+                role=payload.role,
+                topic=payload.topic,
+                window_seconds=self.DUPLICATE_WINDOW_SECONDS,
+                user_id=user_id,
+            )
+            if existing_db is not None:
+                logger.info(
+                    "Duplicate session creation detected in DB for source '%s'; returning existing session '%s'.",
+                    payload.source_id,
+                    existing_db.id,
+                )
+                return _db_model_to_session_detail(existing_db)
+            return None
+
         now_dt = datetime.now(timezone.utc)
-        for existing in self._sessions.values():
+        for existing in self._dev_sessions.values():
+            if user_id is not None and self._dev_session_owners.get(existing.session_id) != user_id:
+                continue
             if (
                 existing.source_id == payload.source_id
                 and existing.role == payload.role
@@ -155,9 +198,12 @@ class SessionService:
         self,
         payload: CreateSessionRequest,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionDetailResponse:
         """Create and initialize a new interview session with optional pre-generated questions."""
-        duplicate = self._find_recent_duplicate_session(payload)
+        self._require_db_in_production(db)
+
+        duplicate = self._find_recent_duplicate_session(payload, db=db, user_id=user_id)
         if duplicate is not None:
             return duplicate
 
@@ -187,7 +233,6 @@ class SessionService:
             created_at=now,
             updated_at=now,
         )
-        self._sessions[session_id] = session
 
         if db is not None:
             self._repository.create_session(
@@ -197,7 +242,12 @@ class SessionService:
                 total_questions=total_questions,
                 current_question_number=current_question_number,
                 questions_list=questions_list,
+                user_id=user_id,
             )
+            commit_session(db)
+        else:
+            self._dev_sessions[session_id] = session
+            self._dev_session_owners[session_id] = user_id
 
         logger.info(
             "Created interview session %s for role '%s' on topic '%s' (source_id=%s).",
@@ -212,19 +262,31 @@ class SessionService:
         self,
         session_id: str,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionDetailResponse:
-        """Retrieve session details and current progress by session ID."""
+        """Retrieve session details and current progress by session ID, enforcing user ownership."""
+        self._require_db_in_production(db)
+
         if db is not None:
             session_db = self._repository.get_session_by_id(db, session_id)
-            if session_db is not None:
-                session_resp = _db_model_to_session_detail(session_db)
-                self._sessions[session_id] = session_resp
-                return session_resp
+            if session_db is None:
+                logger.warning("Session lookup failed: session '%s' not found in database.", session_id)
+                raise SessionNotFoundError(f"Interview session '{session_id}' not found.")
+            if user_id is not None and session_db.user_id != user_id:
+                logger.warning(
+                    "Authorization denied: user '%s' attempted access to session '%s'.",
+                    user_id,
+                    session_id,
+                )
+                raise SessionForbiddenError("You do not have permission to access this interview session.")
+            return _db_model_to_session_detail(session_db)
 
-        session = self._sessions.get(session_id)
+        session = self._dev_sessions.get(session_id)
         if not session:
             logger.warning("Session lookup failed: session '%s' not found.", session_id)
             raise SessionNotFoundError(f"Interview session '{session_id}' not found.")
+        if user_id is not None and self._dev_session_owners.get(session_id) != user_id:
+            raise SessionForbiddenError("You do not have permission to access this interview session.")
         return session
 
     def list_sessions(
@@ -232,23 +294,30 @@ class SessionService:
         db: Optional[Session] = None,
         limit: int = 50,
         skip: int = 0,
+        user_id: Optional[str] = None,
     ) -> List[SessionDetailResponse]:
-        """Retrieve list of interview sessions ordered by creation date descending."""
-        if db is not None:
-            sessions_db = self._repository.list_sessions(db, limit=limit, skip=skip)
-            if sessions_db is not None:
-                return [_db_model_to_session_detail(s) for s in sessions_db]
+        """Retrieve list of interview sessions ordered by creation date descending, scoped to user."""
+        self._require_db_in_production(db)
 
-        all_sessions = list(self._sessions.values())
+        if db is not None:
+            sessions_db = self._repository.list_sessions(db, user_id=user_id, limit=limit, skip=skip)
+            return [_db_model_to_session_detail(s) for s in sessions_db]
+
+        all_sessions = [
+            s
+            for s in self._dev_sessions.values()
+            if user_id is None or self._dev_session_owners.get(s.session_id) == user_id
+        ]
         return all_sessions[skip : skip + limit]
 
     def validate_can_generate_question(
         self,
         session_id: str,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionDetailResponse:
         """Validate that the session is in a valid state to generate the next question."""
-        session = self.get_session(session_id, db=db)
+        session = self.get_session(session_id, db=db, user_id=user_id)
 
         if session.status == SessionStatus.COMPLETED:
             raise SessionStateError("Cannot generate next question: interview session is already completed.")
@@ -274,9 +343,14 @@ class SessionService:
         session_id: str,
         question_data: InterviewQuestionResponse,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionNextQuestionResponse:
         """Append a generated question to the session and advance the question number."""
-        session = self.get_session(session_id, db=db)
+        session = self.get_session(session_id, db=db, user_id=user_id)
+        if len(session.questions) >= session.total_questions:
+            raise SessionStateError(
+                f"Maximum number of questions ({session.total_questions}) already reached for this session."
+            )
         next_question_number = len(session.questions) + 1
 
         question_item = SessionQuestionItem(
@@ -290,18 +364,25 @@ class SessionService:
             evaluation=None,
         )
 
+        if db is not None:
+            try:
+                self._repository.add_question(
+                    db,
+                    session_id=session_id,
+                    question_number=next_question_number,
+                    question_type=enum_to_value(session.question_type),
+                    question_data=question_data,
+                )
+                commit_session(db)
+            except IntegrityError as exc:
+                db.rollback()
+                raise SessionStateError(
+                    f"Question #{next_question_number} was already created concurrently. Please refresh the session."
+                ) from exc
+
         session.questions.append(question_item)
         session.current_question_number = next_question_number
         session.updated_at = datetime.now(timezone.utc).isoformat()
-
-        if db is not None:
-            self._repository.add_question(
-                db,
-                session_id=session_id,
-                question_number=next_question_number,
-                question_type=enum_to_value(session.question_type),
-                question_data=question_data,
-            )
 
         logger.info("Added question #%d to session %s.", next_question_number, session_id)
 
@@ -321,9 +402,10 @@ class SessionService:
         session_id: str,
         question_number: Optional[int] = None,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionQuestionItem:
         """Validate that a candidate answer can be submitted for the specified or current question."""
-        session = self.get_session(session_id, db=db)
+        session = self.get_session(session_id, db=db, user_id=user_id)
 
         if session.status == SessionStatus.COMPLETED:
             raise SessionStateError("Cannot submit answer: interview session is completed.")
@@ -359,14 +441,19 @@ class SessionService:
         candidate_answer: str,
         evaluation: InterviewEvaluationResponse,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> SessionSubmitAnswerResponse:
         """Record candidate answer and AI evaluation on the target question and update progress."""
-        session = self.get_session(session_id, db=db)
+        session = self.get_session(session_id, db=db, user_id=user_id)
         matching = [q for q in session.questions if q.question_number == question_number]
         if not matching:
             raise SessionStateError(f"Question #{question_number} does not exist in this session.")
 
         target = matching[0]
+        if target.candidate_answer is not None:
+            raise SessionStateError(
+                f"Question #{question_number} has already been answered. Duplicate submissions are not allowed."
+            )
         target.candidate_answer = candidate_answer
         target.evaluation = evaluation
 
@@ -382,6 +469,7 @@ class SessionService:
                 evaluation=evaluation,
                 completed_questions=session.completed_questions,
             )
+            commit_session(db)
 
         logger.info(
             "Recorded evaluation for question #%d in session %s. Score: %d (%s). Progress: %d/%d.",
@@ -406,9 +494,10 @@ class SessionService:
         self,
         session_id: str,
         db: Optional[Session] = None,
+        user_id: Optional[str] = None,
     ) -> InterviewSessionSummaryResponse:
         """Mark the session as completed and calculate the final performance summary."""
-        session = self.get_session(session_id, db=db)
+        session = self.get_session(session_id, db=db, user_id=user_id)
 
         session.status = SessionStatus.COMPLETED
         session.updated_at = datetime.now(timezone.utc).isoformat()
@@ -419,6 +508,7 @@ class SessionService:
                 session_id=session_id,
                 status_value=SessionStatus.COMPLETED.value,
             )
+            commit_session(db)
 
         evaluated_questions = [q for q in session.questions if q.evaluation is not None]
         questions_answered = len(evaluated_questions)
@@ -463,8 +553,9 @@ class SessionService:
         )
 
     def reset_store(self) -> None:
-        """Clear all in-memory stored sessions. Used in automated tests."""
-        self._sessions.clear()
+        """Clear all development-only in-memory stored sessions. Used in automated tests."""
+        self._dev_sessions.clear()
+        self._dev_session_owners.clear()
 
 
 _session_service_instance = SessionService()
